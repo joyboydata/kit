@@ -2,17 +2,28 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 )
+
+// multiFlag is a repeatable flag that collects values.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
 
 // LogCall represents one extracted log call.
 type LogCall struct {
@@ -35,6 +46,8 @@ type Field struct {
 
 func main() {
 	out := flag.String("out", "docs/logging.md", "output markdown file path")
+	var scanPkgs multiFlag
+	flag.Var(&scanPkgs, "scan-pkg", "import path of an external package to scan for log events (repeatable)")
 	flag.Parse()
 
 	// Find all .go files in the project (excluding _test.go and _templ.go)
@@ -64,6 +77,17 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "walk: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Resolve external packages and scan their .go files for log events
+	for _, pkg := range scanPkgs {
+		dir, err := resolvePkgDir(pkg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve package %s: %v\n", pkg, err)
+			continue
+		}
+		pkgFiles := scanDir(dir)
+		files = append(files, pkgFiles...)
 	}
 
 	// Parse each file
@@ -112,6 +136,49 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// resolvePkgDir runs `go list -json -find <pkg>` and returns the directory
+// of the package. Works with go.work, replace directives, and the module cache.
+func resolvePkgDir(pkg string) (string, error) {
+	cmd := exec.Command("go", "list", "-json", "-find", pkg)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("go list: %w", err)
+	}
+	var result struct {
+		Dir string `json:"Dir"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return "", fmt.Errorf("parse go list output: %w", err)
+	}
+	if result.Dir == "" {
+		return "", fmt.Errorf("package %q has no Dir in go list output", pkg)
+	}
+	return result.Dir, nil
+}
+
+// scanDir returns all .go files in dir (non-recursive) that match
+// the standard filter (excluding _test.go and _templ.go).
+func scanDir(dir string) []string {
+	var files []string
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".go") &&
+			!strings.HasSuffix(name, "_test.go") &&
+			!strings.HasSuffix(name, "_templ.go") {
+			files = append(files, filepath.Join(dir, name))
+		}
+	}
+	return files
 }
 
 // attrSliceDef maps variable names to their field definitions from []slog.Attr{...}.

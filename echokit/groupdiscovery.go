@@ -36,7 +36,7 @@ import (
 // It carries both the source-level identity (PkgPath.Name) and the
 // resolved types.Type for schema generation.
 type TypeRef struct {
-	PkgPath string      // e.g. "github.com/joyboydata/kit/specification"
+	PkgPath string      // e.g. "github.com/joyboydata/slicer/internal/specification"
 	Name    string      // e.g. "BehavioralSegmentation"
 	Type    types.Type  // The resolved go/types Type
 }

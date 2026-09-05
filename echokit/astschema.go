@@ -274,7 +274,7 @@ func (b *ASTSchemaBuilder) collectTypeFromType(t types.Type) {
 
 // typeDefName generates a definition name from a named type.
 // It strips the module path for concise names, e.g.:
-// "github.com/joyboydata/kit/specification.BehavioralSegmentation"
+// "github.com/joyboydata/slicer/internal/specification.BehavioralSegmentation"
 // becomes "specification.BehavioralSegmentation"
 func typeDefName(named *types.Named) string {
 	pkg := named.Obj().Pkg().Path()

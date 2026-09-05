@@ -138,7 +138,7 @@ func (g *TSTypeGenerator) TypeOrder() []string {
 }
 
 // cleanTSTypeName converts a qualified Go type name like
-// "github.com/joyboydata/kit/specification.BehavioralSegmentation"
+// "github.com/joyboydata/slicer/internal/specification.BehavioralSegmentation"
 // into a clean TypeScript identifier like "SpecificationBehavioralSegmentation".
 func cleanTSTypeName(qualified string) string {
 	// Extract the last meaningful segment before the type name.
