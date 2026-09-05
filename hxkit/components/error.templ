@@ -1,0 +1,20 @@
+package components
+
+templ ErrorSurface(title string, message string) {
+	<div role="alert" data-variant="error">
+		<div>
+			<h6 style="margin:0">{ title }</h6>
+			<p class="text-light" style="margin-block-end:0">{ message }</p>
+		</div>
+	</div>
+}
+
+templ ErrorSurfaceWithAction(title string, message string, actionLabel string, actionHref string) {
+	<div role="alert" data-variant="error">
+		<div>
+			<h6 style="margin:0">{ title }</h6>
+			<p class="text-light">{ message }</p>
+			<a href={ actionHref } class="small">{ actionLabel }</a>
+		</div>
+	</div>
+}
