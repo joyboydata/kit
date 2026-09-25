@@ -8,6 +8,29 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// RenderPage renders a templ component, wrapping it with the provided layout
+// function for direct (non-HTMX) requests. For HTMX requests (via hx-boost or
+// explicit hx-get attributes), only the body is rendered — the layout is skipped.
+//
+// This enables SPA-style navigation where the server returns a full page for
+// initial loads and just the body for in-app navigation, without duplicating
+// handler logic or maintaining separate page/fragment endpoints.
+//
+// Usage:
+//
+//	func myHandler(c echo.Context) error {
+//	    data := buildData(c)
+//	    return hxkit.RenderPage(c, http.StatusOK, myBody(data), func(body templ.Component) templ.Component {
+//	        return myLayout("Page Title", body)
+//	    })
+//	}
+func RenderPage(c echo.Context, status int, body templ.Component, layoutFn func(templ.Component) templ.Component) error {
+	if IsHTMX(c) {
+		return Render(c, status, body)
+	}
+	return Render(c, status, layoutFn(body))
+}
+
 // Render buffers a templ.Component, renders it with the request context,
 // and writes the output as HTML with the given status code.
 //
