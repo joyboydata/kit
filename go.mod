@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/a-h/templ v0.3.1020
+	github.com/adrg/xdg v0.5.3
 	github.com/creasty/defaults v1.8.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/labstack/echo/v4 v4.15.4
