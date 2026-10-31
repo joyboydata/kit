@@ -12,12 +12,13 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// Watch is the stdlib-only subscription seam for streams. It returns a
-// channel closed or signaled on every state change, plus an unsubscribe
-// func the framework calls when the SSE connection ends. The app adapts
-// its stores to this shape at the call site; kit never imports a
-// datastore, operation log, or view package.
-type Watch func(ctx context.Context) (<-chan struct{}, func())
+// Watch is the subscription seam for streams. It receives the request's
+// echo.Context so the app can read request state (e.g. auth.GetUser(c))
+// to build per-user store subscriptions, and returns a channel signaled
+// on every state change plus an unsubscribe func the framework calls
+// when the SSE connection ends. Kit takes echo already; it still never
+// imports a datastore, operation log, or view package.
+type Watch func(c echo.Context) (<-chan struct{}, func())
 
 // Event is one named live region on a stream. Name must equal the
 // layout's sse-swap value: that string is the htmx-ext-sse contract
@@ -93,7 +94,7 @@ func (a App) serveStream(s Stream) echo.HandlerFunc {
 			if sub == nil {
 				continue
 			}
-			ch, unsub := sub(ctx)
+			ch, unsub := sub(c)
 			if ch == nil {
 				if unsub != nil {
 					unsub()

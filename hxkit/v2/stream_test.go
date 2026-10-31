@@ -60,7 +60,7 @@ func streamApp(st *streamState, fire chan struct{}) App {
 						Events: []Event{
 							{
 								Name: "things",
-								Subscribe: func(ctx context.Context) (<-chan struct{}, func()) {
+								Subscribe: func(c echo.Context) (<-chan struct{}, func()) {
 									return fire, st.markUnsubbed
 								},
 								Render: func(c echo.Context) (templ.Component, error) {
