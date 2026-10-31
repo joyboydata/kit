@@ -25,7 +25,12 @@ type App struct {
 	Errors Errors
 
 	Resources []Resource
+
+	logger *slog.Logger
 }
+
+// log returns the Register-configured logger, falling back to the
+// process default so framework deprecations stay visible.
 
 // Option configures Register behavior.
 type Option func(*options)
@@ -56,6 +61,7 @@ func (a App) Register(e *echo.Echo, opts ...Option) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	a.logger = cfg.logger
 
 	for _, r := range a.Resources {
 		h := a.serveResource(r)
@@ -133,6 +139,13 @@ func wrapHandler(h echo.HandlerFunc, logger *slog.Logger) echo.HandlerFunc {
 // IsHTMX reports whether the request carries the HX-Request header.
 func IsHTMX(c echo.Context) bool {
 	return strings.EqualFold(c.Request().Header.Get("HX-Request"), "true")
+}
+
+func (a App) log() *slog.Logger {
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // joinPaths joins a base path and a relative path. Absolute paths pass

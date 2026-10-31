@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 	"github.com/labstack/echo/v4"
@@ -22,26 +23,53 @@ type Watch func(c echo.Context) (<-chan struct{}, func())
 
 // Event is one named live region on a stream. Name must equal the
 // layout's sse-swap value: that string is the htmx-ext-sse contract
-// binding the pushed frame to the element it swaps.
+// binding a pushed frame to the element it swaps. Resolve computes the
+// current frames on demand; when it is nil the static Render path is
+// used as a degenerate constant Resolve of one Fired.
 type Event struct {
 	Name      string
 	Subscribe Watch
 	Render    Handler
+	Resolve   func(c echo.Context) []Fired
 }
+
+// Fired is one resolved frame: the region to swap and what to put in
+// it. Resolve may return frames for regions beyond its own event name,
+// so one subscription can update several layout slots at once.
+type Fired struct {
+	Name      string
+	Component templ.Component
+}
+
+// DefaultTick is the debounce window coalescing notification bursts
+// into one resolve when Stream.Tick is unset.
+const DefaultTick = 80 * time.Millisecond
+
+// redirectEvent is the terminal frame name. The app's client script
+// listens for it and navigates to the frame URL.
+const redirectEvent = "redirect"
 
 // Stream is an SSE endpoint owned by a resource. Replay pushes current
 // state on connect so late joiners converge without waiting for the
-// next change.
+// next change. Tick bounds the resolve rate: notification bursts
+// coalesce into one resolve per quiet window (DefaultTick when unset).
+// Terminal, when non-nil, ends the stream: returning (url, true) emits
+// a redirect frame with the URL, flushes, and closes. A nil Terminal
+// lives until the client disconnects.
 type Stream struct {
-	Path   string
-	Replay bool
-	Events []Event
+	Path     string
+	Replay   bool
+	Tick     time.Duration
+	Events   []Event
+	Terminal func(c echo.Context) (string, bool)
 }
 
-// serveStream owns replay-on-connect, framing, flush, and dedup.
-// Identical re-renders are skipped per event; render errors skip the
-// frame and keep the connection alive. The loop ends when the client
-// goes away.
+// serveStream owns replay-on-connect, framing, flush, debounce, and
+// dedup. Each flush resolves every event, skips frames identical to
+// the last sent for that name, and skips render errors while keeping
+// the connection alive. Notifications arriving inside one tick window
+// coalesce into a single flush. The loop ends when Terminal fires or
+// the client goes away.
 func (a App) serveStream(s Stream) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		if len(s.Events) == 0 {
@@ -64,27 +92,39 @@ func (a App) serveStream(s Stream) echo.HandlerFunc {
 		res.WriteHeader(http.StatusOK)
 		fl.Flush()
 
-		last := make([]string, len(s.Events))
-		send := func(i int) {
-			comp, err := s.Events[i].Render(c)
-			if err != nil || comp == nil {
-				return
-			}
-			html, err := renderString(ctx, comp)
-			if err != nil || html == last[i] {
-				return
-			}
-			last[i] = html
-			if err := writeFrame(res.Writer, s.Events[i].Name, html); err != nil {
-				return
-			}
-			fl.Flush()
+		tick := s.Tick
+		if tick <= 0 {
+			tick = DefaultTick
 		}
 
-		if s.Replay {
+		last := make(map[string]string)
+		flush := func() bool {
 			for i := range s.Events {
-				send(i)
+				for _, f := range resolveEvent(c, &s.Events[i]) {
+					if f.Name == "" || f.Component == nil {
+						continue
+					}
+					html, err := renderString(ctx, f.Component)
+					if err != nil || html == last[f.Name] {
+						continue
+					}
+					last[f.Name] = html
+					if err := writeFrame(res.Writer, f.Name, html); err != nil {
+						return true
+					}
+					fl.Flush()
+				}
 			}
+			if s.Terminal != nil {
+				if url, ok := s.Terminal(c); ok {
+					if err := writeFrame(res.Writer, redirectEvent, url); err != nil {
+						return true
+					}
+					fl.Flush()
+					return true
+				}
+			}
+			return false
 		}
 
 		notify := make(chan int)
@@ -128,15 +168,60 @@ func (a App) serveStream(s Stream) echo.HandlerFunc {
 			}
 		}()
 
+		if s.Replay {
+			if flush() {
+				return nil
+			}
+		}
+
+		var timer *time.Timer
+		var timerCh <-chan time.Time
+		schedule := func() {
+			if timer == nil {
+				timer = time.NewTimer(tick)
+				timerCh = timer.C
+				return
+			}
+			if !timer.Stop() {
+				select {
+				case <-timerCh:
+				default:
+				}
+			}
+			timer.Reset(tick)
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			case i := <-notify:
-				send(i)
+			case <-notify:
+				schedule()
+			case <-timerCh:
+				timer = nil
+				timerCh = nil
+				if flush() {
+					return nil
+				}
 			}
 		}
 	}
+}
+
+// resolveEvent computes one event's current frames. A set Resolve wins;
+// otherwise the static Render path degrades to a constant single frame.
+func resolveEvent(c echo.Context, ev *Event) []Fired {
+	if ev.Resolve != nil {
+		return ev.Resolve(c)
+	}
+	if ev.Render == nil {
+		return nil
+	}
+	comp, err := ev.Render(c)
+	if err != nil || comp == nil {
+		return nil
+	}
+	return []Fired{{Name: ev.Name, Component: comp}}
 }
 
 // writeFrame emits one SSE frame. Data is split so every line carries

@@ -167,13 +167,18 @@ func TestMutationRendersFragment(t *testing.T) {
 	}
 }
 
-func TestMutationNilComponentRedirectsToResource(t *testing.T) {
+func TestMutationNilComponentMapsToHold(t *testing.T) {
 	rec := serve(testApp(), http.MethodPost, "/apps/gone", true)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want 303", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/apps" {
-		t.Fatalf("Location = %q, want /apps", loc)
+	if rec.Body.String() != "" {
+		t.Fatalf("nil should hold with empty body, got %q", rec.Body.String())
+	}
+
+	rec = serve(testApp(), http.MethodPost, "/apps/gone", false)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
 	}
 }
 

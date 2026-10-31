@@ -39,7 +39,8 @@ type Representation struct {
 
 // Mutation is a write endpoint owned by a resource. Method defaults to
 // POST; Path defaults to the resource path, joins it when relative,
-// and overrides it when absolute.
+// and overrides it when absolute. The handler returns a result command
+// (SwapWith, RedirectTo, Hold) or a plain component; see mutation.go.
 type Mutation struct {
 	Method  string
 	Path    string
@@ -76,29 +77,6 @@ func (a App) serveResource(res Resource) echo.HandlerFunc {
 		}
 		if comp == nil {
 			return a.writeError(c, E(http.StatusInternalServerError, "nil component"))
-		}
-		if !IsHTMX(c) && a.Layout != nil {
-			comp = a.Layout(comp)
-		}
-		return renderComponent(c, http.StatusOK, comp)
-	}
-}
-
-// serveMutation runs a write endpoint. A nil component means "no
-// fragment to swap": the framework issues a 303 back to the resource
-// path, which HTMX follows with a GET that re-renders the resource.
-// Anything else renders like a representation; errors follow App policy.
-func (a App) serveMutation(res Resource, m Mutation) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		if m.Handler == nil {
-			return a.writeError(c, E(http.StatusInternalServerError, "missing handler"))
-		}
-		comp, err := m.Handler(c)
-		if err != nil {
-			return a.writeError(c, err)
-		}
-		if comp == nil {
-			return c.Redirect(http.StatusSeeOther, res.Path)
 		}
 		if !IsHTMX(c) && a.Layout != nil {
 			comp = a.Layout(comp)

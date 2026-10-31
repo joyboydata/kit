@@ -43,7 +43,7 @@ func (s *streamState) wasUnsubbed() bool {
 	return s.unsubbed
 }
 
-func streamApp(st *streamState, fire chan struct{}) App {
+func streamApp(st *streamState, fire chan struct{}, tick time.Duration) App {
 	return App{
 		Resources: []Resource{
 			{
@@ -57,6 +57,7 @@ func streamApp(st *streamState, fire chan struct{}) App {
 					{
 						Path:   "/things/events",
 						Replay: true,
+						Tick:   tick,
 						Events: []Event{
 							{
 								Name: "things",
@@ -80,7 +81,7 @@ func TestStreamReplayAndHeaders(t *testing.T) {
 	fire := make(chan struct{}, 4)
 
 	e := echo.New()
-	streamApp(st, fire).Register(e)
+	streamApp(st, fire, 10*time.Millisecond).Register(e)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(150*time.Millisecond, cancel)
@@ -108,7 +109,7 @@ func TestStreamDedupsIdenticalRenders(t *testing.T) {
 	fire := make(chan struct{}, 4)
 
 	e := echo.New()
-	streamApp(st, fire).Register(e)
+	streamApp(st, fire, 10*time.Millisecond).Register(e)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -134,7 +135,7 @@ func TestStreamSplitsMultilineData(t *testing.T) {
 	fire := make(chan struct{}, 4)
 
 	e := echo.New()
-	streamApp(st, fire).Register(e)
+	streamApp(st, fire, 10*time.Millisecond).Register(e)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
@@ -159,5 +160,120 @@ func TestStreamWithoutEvents404s(t *testing.T) {
 	rec := serve(app, http.MethodGet, "/empty/events", false)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+type dynState struct {
+	streamState
+	tick     time.Duration
+	redirect string
+}
+
+func dynApp(st *dynState, fire chan struct{}) App {
+	return App{
+		Resources: []Resource{{
+			Path: "/rev",
+			Representations: []Representation{{Name: "", Handler: func(c echo.Context) (templ.Component, error) {
+				return text("rev"), nil
+			}}},
+			Streams: []Stream{{
+				Path:   "/rev/events",
+				Replay: true,
+				Tick:   st.tick,
+				Events: []Event{{
+					Name: "rev",
+					Subscribe: func(c echo.Context) (<-chan struct{}, func()) {
+						return fire, st.markUnsubbed
+					},
+					Resolve: func(c echo.Context) []Fired {
+						return []Fired{
+							{Name: "rev", Component: text(st.get())},
+							{Name: "side", Component: text("side:" + st.get())},
+						}
+					},
+				}},
+				Terminal: func(c echo.Context) (string, bool) {
+					if st.redirect != "" {
+						return st.redirect, true
+					}
+					return "", false
+				},
+			}},
+		}},
+	}
+}
+
+func TestResolveServesNamedFired(t *testing.T) {
+	st := &dynState{streamState: streamState{content: "r1"}, tick: 10 * time.Millisecond}
+	fire := make(chan struct{}, 4)
+
+	e := echo.New()
+	dynApp(st, fire).Register(e)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		st.set("r2")
+		fire <- struct{}{}
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	req := httptest.NewRequest(http.MethodGet, "/rev/events", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: rev\n") || !strings.Contains(body, "data: r2\n") {
+		t.Fatalf("resolve should push updated frames, got %q", body)
+	}
+	if !strings.Contains(body, "event: side\n") || !strings.Contains(body, "data: side:r2\n") {
+		t.Fatalf("one resolve may feed several regions, got %q", body)
+	}
+}
+
+func TestDebounceCoalescesBursts(t *testing.T) {
+	st := &dynState{streamState: streamState{content: "v1"}, tick: 30 * time.Millisecond}
+	fire := make(chan struct{}, 4)
+
+	e := echo.New()
+	dynApp(st, fire).Register(e)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		fire <- struct{}{}
+		time.Sleep(5 * time.Millisecond)
+		fire <- struct{}{}
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	req := httptest.NewRequest(http.MethodGet, "/rev/events", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if n := strings.Count(rec.Body.String(), "event: rev\n"); n != 1 {
+		t.Fatalf("burst should coalesce into replay only, frames = %d: %q", n, rec.Body.String())
+	}
+}
+
+func TestTerminalRedirectCloses(t *testing.T) {
+	st := &dynState{streamState: streamState{content: "v1"}, redirect: "/done"}
+	fire := make(chan struct{}, 4)
+
+	e := echo.New()
+	dynApp(st, fire).Register(e)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Second, cancel)
+	req := httptest.NewRequest(http.MethodGet, "/rev/events", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: redirect\n") || !strings.Contains(body, "data: /done\n") {
+		t.Fatalf("terminal should emit redirect frame, got %q", body)
+	}
+	if !st.wasUnsubbed() {
+		t.Fatal("terminal close should still unsubscribe")
 	}
 }
