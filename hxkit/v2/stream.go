@@ -49,7 +49,11 @@ const DefaultTick = 80 * time.Millisecond
 // listens for it and navigates to the frame URL.
 const redirectEvent = "redirect"
 
-// Stream is an SSE endpoint owned by a resource. Replay pushes current
+// Stream is an SSE endpoint owned by a resource. Path is always relative
+// to the resource path like a mutation (a leading "/" is stripped, ""
+// means the resource path itself): "stream" under "/apps/:id" serves
+// /apps/:id/stream. There is no absolute override; off-prefix endpoints
+// are their own Resource. Replay pushes current
 // state on connect so late joiners converge without waiting for the
 // next change. Tick bounds the resolve rate: notification bursts
 // coalesce into one resolve per quiet window (DefaultTick when unset).
@@ -73,7 +77,7 @@ type Stream struct {
 func (a App) serveStream(s Stream) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		if len(s.Events) == 0 {
-			return echo.NewHTTPError(http.StatusNotFound, "stream has no events")
+			return a.writeError(c, E(http.StatusNotFound, "stream has no events"))
 		}
 
 		res := c.Response()

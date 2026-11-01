@@ -55,7 +55,7 @@ func streamApp(st *streamState, fire chan struct{}, tick time.Duration) App {
 				},
 				Streams: []Stream{
 					{
-						Path:   "/things/events",
+						Path:   "events",
 						Replay: true,
 						Tick:   tick,
 						Events: []Event{
@@ -155,7 +155,7 @@ func TestStreamWithoutEvents404s(t *testing.T) {
 		Representations: []Representation{{Name: "", Handler: func(c echo.Context) (templ.Component, error) {
 			return text("x"), nil
 		}}},
-		Streams: []Stream{{Path: "/empty/events"}},
+		Streams: []Stream{{Path: "events"}},
 	}}}
 	rec := serve(app, http.MethodGet, "/empty/events", false)
 	if rec.Code != http.StatusNotFound {
@@ -177,7 +177,7 @@ func dynApp(st *dynState, fire chan struct{}) App {
 				return text("rev"), nil
 			}}},
 			Streams: []Stream{{
-				Path:   "/rev/events",
+				Path:   "events",
 				Replay: true,
 				Tick:   st.tick,
 				Events: []Event{{

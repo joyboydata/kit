@@ -38,9 +38,12 @@ type Representation struct {
 }
 
 // Mutation is a write endpoint owned by a resource. Method defaults to
-// POST; Path defaults to the resource path, joins it when relative,
-// and overrides it when absolute. The handler returns a result command
-// (SwapWith, RedirectTo, Hold) or a plain component; see mutation.go.
+// POST; Path is always relative to the resource path (a leading "/" is
+// stripped, so "/:id" and ":id" mean the same thing) and empty means
+// the resource path itself. There is no absolute override: a mutation
+// that must live outside the resource prefix is a second Resource.
+// The handler returns a result command (SwapWith, RedirectTo, Hold) or
+// a plain component; see mutation.go.
 type Mutation struct {
 	Method  string
 	Path    string
@@ -63,10 +66,10 @@ func (a App) serveResource(res Resource) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		rep, ok := selectRep(res.Representations, c.QueryParam(viewParam))
 		if !ok {
-			return echo.NewHTTPError(http.StatusNotFound, "unknown view")
+			return a.writeError(c, E(http.StatusNotFound, "unknown view"))
 		}
 		if rep.EmbedOnly && !IsHTMX(c) {
-			return echo.NewHTTPError(http.StatusNotFound, "not found")
+			return a.writeError(c, E(http.StatusNotFound, "not found"))
 		}
 		if rep.Handler == nil {
 			return a.writeError(c, E(http.StatusInternalServerError, "missing handler"))

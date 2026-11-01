@@ -183,9 +183,16 @@ func TestMutationNilComponentMapsToHold(t *testing.T) {
 }
 
 func TestMutationPathJoining(t *testing.T) {
-	rec := serve(testApp(), http.MethodPost, "/absolute", true)
+	// Leading-/ sub-paths join under the resource; there is no absolute
+	// override (it once shipped PATCH /:id at root and 404'd real routes).
+	rec := serve(testApp(), http.MethodPost, "/apps/absolute", true)
 	if rec.Code != http.StatusOK || rec.Body.String() != "abs" {
-		t.Fatalf("absolute path should bypass resource prefix, got %d %q", rec.Code, rec.Body.String())
+		t.Fatalf("leading-/ path should join resource prefix, got %d %q", rec.Code, rec.Body.String())
+	}
+
+	rec = serve(testApp(), http.MethodPost, "/absolute", true)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("root escape = %d %q, want 404 (override class removed)", rec.Code, rec.Body.String())
 	}
 }
 

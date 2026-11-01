@@ -79,7 +79,7 @@ func TestReproStreamRelativePathJoinsResource(t *testing.T) {
 				Path:   "stream",
 				Replay: true,
 				Events: []Event{{
-					Name:    "rev",
+					Name:   "rev",
 					Render: func(c echo.Context) (templ.Component, error) { return text("rev"), nil },
 				}},
 			}},

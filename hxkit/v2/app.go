@@ -51,6 +51,41 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// Route is one method+path pair Register adds to Echo. Dump it in tests
+// and deploy checks to audit the final table — a misrouted PATCH /:id
+// sitting at root is what this dump is for.
+type Route struct {
+	Method string
+	Path   string
+}
+
+// Routes returns the method+path table Register will add, with mutation
+// and stream sub-paths already joined to their resource. It shares the
+// computation with Register so the audit can never drift from reality.
+func (a App) Routes() []Route {
+	var out []Route
+	for _, r := range a.Resources {
+		// A representation-less resource (a stream owner like the
+		// status endpoint) serves no GET of its own; registering one
+		// would only add a guaranteed-404 route — and collide with an
+		// empty-path stream joined to the same path.
+		if len(r.Representations) > 0 {
+			out = append(out, Route{Method: http.MethodGet, Path: r.Path})
+		}
+		for _, m := range r.Mutations {
+			method := m.Method
+			if method == "" {
+				method = http.MethodPost
+			}
+			out = append(out, Route{Method: method, Path: joinPaths(r.Path, m.Path)})
+		}
+		for _, s := range r.Streams {
+			out = append(out, Route{Method: http.MethodGet, Path: joinPaths(r.Path, s.Path)})
+		}
+	}
+	return out
+}
+
 // Register adds every resource, mutation, and stream route to e.
 func (a App) Register(e *echo.Echo, opts ...Option) {
 	if e == nil {
@@ -64,11 +99,13 @@ func (a App) Register(e *echo.Echo, opts ...Option) {
 	a.logger = cfg.logger
 
 	for _, r := range a.Resources {
-		h := a.serveResource(r)
-		if cfg.logger != nil {
-			h = wrapHandler(h, cfg.logger)
+		if len(r.Representations) > 0 {
+			h := a.serveResource(r)
+			if cfg.logger != nil {
+				h = wrapHandler(h, cfg.logger)
+			}
+			e.GET(r.Path, h)
 		}
-		e.GET(r.Path, h)
 
 		for _, m := range r.Mutations {
 			method := m.Method
@@ -87,7 +124,7 @@ func (a App) Register(e *echo.Echo, opts ...Option) {
 			if cfg.logger != nil {
 				sh = wrapHandler(sh, cfg.logger)
 			}
-			e.GET(s.Path, sh)
+			e.GET(joinPaths(r.Path, s.Path), sh)
 		}
 	}
 }
@@ -148,18 +185,20 @@ func (a App) log() *slog.Logger {
 	return slog.Default()
 }
 
-// joinPaths joins a base path and a relative path. Absolute paths pass
-// through untouched so mutations and streams can live outside the
-// resource prefix when they must.
+// joinPaths joins a resource path and a sub-path. The sub-path is always
+// relative: a leading "/" is stripped, so "/:id" and ":id" both land
+// under the resource, and "" means the resource path itself. There is
+// deliberately no absolute override — a leading-/ typo used to register
+// PATCH /:id at root and 404 the real route with no signal, so the
+// override class was removed instead of warned about. Off-prefix
+// endpoints are declared as their own Resource.
 func joinPaths(base string, p string) string {
+	p = strings.TrimLeft(p, "/")
 	if p == "" {
 		if base == "" {
 			return "/"
 		}
 		return base
-	}
-	if strings.HasPrefix(p, "/") {
-		return p
 	}
 	if base == "" {
 		return "/" + p
