@@ -3,11 +3,9 @@ package sandbox_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -42,200 +40,178 @@ func stubApp() v2.App {
 	}
 }
 
-func markerSeed(name string) func(ctx context.Context) error {
-	return func(ctx context.Context) error {
-		dirs, ok := sandbox.DirsFrom(ctx)
-		if !ok {
-			return nil
-		}
-		return os.WriteFile(filepath.Join(dirs.Data, name+".marker"), []byte(name), 0o644)
+// stubExternal is an in-process fake: Set mutates memory, Fire dials the
+// app webhook with req.Host set explicitly (the domain trap).
+type stubExternal struct {
+	mu        sync.Mutex
+	email     string
+	firedHost string
+	hookURL   string
+	hookSeen  *string
+	hookMu    *sync.Mutex
+}
+
+func (s *stubExternal) Name() string { return "mail" }
+
+func (s *stubExternal) State() any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]string{"email": s.email}
+}
+
+func (s *stubExternal) Set(state map[string]any) error {
+	email, ok := state["email"].(string)
+	if !ok || email == "" {
+		return fmt.Errorf("sandbox: email required")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.email = email
+	return nil
 }
 
-// fakeUser is app-side fake-service state on the fakes mux, beside the
-// built-in state resource: kit sets no allowlist, the app registers
-// whatever behavior endpoints its clients call.
-type fakeUser struct {
-	mu    sync.Mutex
-	email string
+// Fire dials the app address but dispatches on host.
+func (s *stubExternal) Fire(host string) error {
+	s.mu.Lock()
+	s.firedHost = host
+	url := s.hookURL
+	s.mu.Unlock()
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Host = host
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("sandbox: hook %d", resp.StatusCode)
+	}
+	return nil
 }
 
-func (f *fakeUser) get() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.email
+func (s *stubExternal) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.email = "fake@example.com"
+	s.firedHost = ""
 }
 
-func (f *fakeUser) set(email string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.email = email
+func (s *stubExternal) fired() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firedHost
 }
 
-func baseConfig(user *fakeUser) sandbox.Config {
+func testConfig(ext *stubExternal, hookSeen *string, hookMu *sync.Mutex) sandbox.Config {
 	return sandbox.Config{
 		Mount: sandbox.Mount{
 			App: stubApp(),
 			Extra: func(e *echo.Echo) {
-				e.POST("/_control/touch", func(c echo.Context) error {
-					return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
+				e.POST("/hook", func(c echo.Context) error {
+					hookMu.Lock()
+					*hookSeen = c.Request().Host
+					hookMu.Unlock()
+					return c.NoContent(http.StatusOK)
 				})
 			},
 		},
-		Fakes: func(mux *http.ServeMux, ctl sandbox.Control) {
-			mux.HandleFunc("/fake/user", func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodGet:
-					_ = json.NewEncoder(w).Encode(map[string]string{"email": user.get()})
-				case http.MethodPost:
-					var req struct {
-						Email string `json:"email"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-						http.Error(w, "invalid body", http.StatusBadRequest)
-						return
-					}
-					user.set(req.Email)
-					_ = json.NewEncoder(w).Encode(map[string]string{"email": req.Email})
-				default:
-					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				}
-			})
-			mux.HandleFunc("/fake/reset", func(w http.ResponseWriter, r *http.Request) {
-				user.set("fake@example.com")
-				w.WriteHeader(http.StatusOK)
-			})
-		},
+		Externals: []sandbox.External{ext},
 		Seeds: map[string]func(ctx context.Context) error{
-			"alpha": markerSeed("alpha"),
-			"beta":  markerSeed("beta"),
+			"alpha": func(_ context.Context) error {
+				return ext.Set(map[string]any{"email": "alpha@example.com"})
+			},
+			"beta": func(_ context.Context) error {
+				return ext.Set(map[string]any{"email": "beta@example.com"})
+			},
 		},
-		Open: func(d sandbox.Dirs) (io.Closer, error) {
+		Default: "alpha",
+		Open: func(_ sandbox.Dirs) (io.Closer, error) {
 			return io.NopCloser(nil), nil
 		},
 		Describe: func() any {
-			return map[string]string{"mode": "stub"}
+			return ext.State()
 		},
 	}
 }
 
-func TestTransport(t *testing.T) {
-	user := &fakeUser{email: "fake@example.com"}
-	env, err := sandbox.Start(baseConfig(user))
+func get(t *testing.T, client *http.Client, url string) (int, string) {
+	t.Helper()
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func TestStateRoutes(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	env, err := sandbox.Start(testConfig(ext, &hookSeen, &hookMu))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer env.Close()
+	if env.FakeBase != env.BaseURL {
+		t.Fatalf("FakeBase = %q, want alias of BaseURL", env.FakeBase)
+	}
 	client := env.WebClient()
 
-	get := func(url string) (int, string) {
-		t.Helper()
-		resp, err := client.Get(url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		body, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, string(body)
-	}
-
-	if code, body := get(env.BaseURL + "/"); code != http.StatusOK || body != "hello" {
+	if code, body := get(t, client, env.BaseURL+"/"); code != http.StatusOK || body != "hello" {
 		t.Fatalf("GET / = %d %q, want 200 hello", code, body)
 	}
-	if code, body := get(env.BaseURL + "/_control/state"); code != http.StatusOK || !strings.Contains(body, "stub") {
-		t.Fatalf("GET /_control/state = %d %q, want Describe bare", code, body)
+	// Default seed applied at Start.
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("GET /_control/state = %d %q, want default Describe", code, body)
 	}
-	if code, body := get(env.BaseURL + "/_control/scenarios"); code != http.StatusOK ||
+	if code, body := get(t, client, env.BaseURL+"/_control/scenarios"); code != http.StatusOK ||
 		!strings.Contains(body, "alpha") || !strings.Contains(body, "beta") {
 		t.Fatalf("GET /_control/scenarios = %d %q, want alpha+beta", code, body)
 	}
-	resp, err := client.Post(env.BaseURL+"/_control/touch", "application/json", nil)
+	if err := env.Seed("beta"); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "beta@example.com") {
+		t.Fatalf("after Seed(beta) state = %d %q", code, body)
+	}
+	// Unknown scenario is a 404 JSON, not a wipe.
+	if err := env.Seed("nope"); err == nil {
+		t.Fatal("Seed(nope) = nil, want error")
+	}
+	// Empty scenario wipes only: externals reset to defaults.
+	if err := env.Seed(""); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "fake@example.com") {
+		t.Fatalf("after Seed(\"\") state = %d %q, want reset defaults", code, body)
+	}
+	// Compat alias over query param.
+	resp, err := client.Post(env.BaseURL+"/_control/seed?scenario=alpha", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /_control/touch = %d, want 200", resp.StatusCode)
+		t.Fatalf("POST /_control/seed = %d, want 200", resp.StatusCode)
 	}
-
-	if err := env.Seed("alpha"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(env.Dirs().Data, "alpha.marker")); err != nil {
-		t.Fatalf("seed marker missing: %v", err)
-	}
-	// Compat alias wipes before reseeding: beta in, alpha gone.
-	alias, err := client.Post(env.BaseURL+"/_control/seed?scenario=beta", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = alias.Body.Close()
-	if alias.StatusCode != http.StatusOK {
-		t.Fatalf("POST /_control/seed = %d, want 200", alias.StatusCode)
-	}
-	if _, err := os.Stat(filepath.Join(env.Dirs().Data, "beta.marker")); err != nil {
-		t.Fatalf("alias seed marker missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(env.Dirs().Data, "alpha.marker")); !os.IsNotExist(err) {
-		t.Fatal("alpha.marker survived reseed, want wiped")
-	}
-	if err := env.Seed("nope"); err == nil {
-		t.Fatal("Seed(nope) = nil, want unknown-scenario error")
-	}
-
-	// App behavior endpoints beside the state resource.
-	if code, body := get(env.FakeBase + "/fake/user"); code != http.StatusOK || !strings.Contains(body, "fake@example.com") {
-		t.Fatalf("GET /fake/user = %d %q, want default identity", code, body)
-	}
-	setReq, _ := http.NewRequest(http.MethodPost, env.FakeBase+"/fake/user", strings.NewReader(`{"email":"new@example.com"}`))
-	setResp, err := http.DefaultClient.Do(setReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = setResp.Body.Close()
-	if user.get() != "new@example.com" {
-		t.Fatalf("fake identity = %q, want new@example.com", user.get())
-	}
-	if _, err := http.DefaultClient.Post(env.FakeBase+"/fake/reset", "", nil); err != nil {
-		t.Fatal(err)
-	}
-	if user.get() != "fake@example.com" {
-		t.Fatalf("after reset identity = %q, want default", user.get())
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("after compat seed state = %d %q", code, body)
 	}
 }
 
-func TestRoutingWebhookBackground(t *testing.T) {
-	var mu sync.Mutex
-	var hookHost string
+func TestWorldFireBackground(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	cfg := testConfig(ext, &hookSeen, &hookMu)
 	started := make(chan struct{})
 	stopped := make(chan struct{})
-	targets := struct {
-		sync.Mutex
-		url  string
-		host string
-	}{}
-
-	cfg := baseConfig(&fakeUser{email: "fake@example.com"})
-	cfg.Mount.Routes = func(baseURL string) sandbox.RouteFunc {
-		u, _ := url.Parse(baseURL)
-		port := u.Port()
-		return func(sub, path string) string {
-			if sub == "" {
-				return baseURL + path
-			}
-			return "http://" + sub + ".example.test:" + port + path
-		}
-	}
-	cfg.Mount.Webhook = sandbox.Webhook{Sub: "app", Path: "/hook"}
-	cfg.Mount.Extra = func(e *echo.Echo) {
-		e.POST("/hook", func(c echo.Context) error {
-			mu.Lock()
-			hookHost = c.Request().Host
-			mu.Unlock()
-			return c.NoContent(http.StatusOK)
-		})
-	}
-	cfg.Mount.Background = []func(ctx context.Context) error{
+	cfg.Background = []func(ctx context.Context) error{
 		func(ctx context.Context) error {
 			close(started)
 			<-ctx.Done()
@@ -243,85 +219,71 @@ func TestRoutingWebhookBackground(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	cfg.Fakes = func(mux *http.ServeMux, ctl sandbox.Control) {
-		mux.HandleFunc("/fake/pay", func(w http.ResponseWriter, r *http.Request) {
-			targets.Lock()
-			fireURL, fireHost := targets.url, targets.host
-			targets.Unlock()
-			req, err := http.NewRequest(http.MethodPost, fireURL, nil)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			req.Host = fireHost
-			fireResp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			_ = fireResp.Body.Close()
-			w.WriteHeader(http.StatusOK)
-		})
-	}
-
 	env, err := sandbox.Start(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer env.Close()
-	targets.Lock()
-	targets.url, targets.host = env.WebhookURL, env.WebhookHost
-	targets.Unlock()
-
-	u, _ := url.Parse(env.BaseURL)
-	port := u.Port()
-	if got := env.Route("app", "/x"); got != "http://app.example.test:"+port+"/x" {
-		t.Fatalf("Route(app, /x) = %q, want subdomain shape", got)
-	}
-	if env.WebhookURL != env.BaseURL+"/hook" {
-		t.Fatalf("WebhookURL = %q, want dialable mount URL", env.WebhookURL)
-	}
-	if env.WebhookHost != "app.example.test:"+port {
-		t.Fatalf("WebhookHost = %q, want subdomain host with port", env.WebhookHost)
-	}
+	ext.mu.Lock()
+	ext.hookURL = env.BaseURL + "/hook"
+	ext.mu.Unlock()
 
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("background service did not start")
+		t.Fatal("background did not start")
 	}
-
-	// App-facing URL drives the mount through the no-DNS client.
-	resp, err := env.WebClient().Get(env.Route("app", "/"))
+	client := env.WebClient()
+	if code, body := get(t, client, env.BaseURL+"/_control/world"); code != http.StatusOK || !strings.Contains(body, "mail") {
+		t.Fatalf("GET /_control/world = %d %q, want mail entry", code, body)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/world/mail"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("GET /_control/world/mail = %d %q", code, body)
+	}
+	// Set per-external state.
+	setReq, _ := http.NewRequest(http.MethodPut, env.BaseURL+"/_control/world/mail", strings.NewReader(`{"email":"new@example.com"}`))
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp, err := client.Do(setReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if string(body) != "hello" {
-		t.Fatalf("GET app shape = %q, want hello", body)
+	_ = setResp.Body.Close()
+	if setResp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /_control/world/mail = %d, want 200", setResp.StatusCode)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/world/mail"); code != http.StatusOK || !strings.Contains(body, "new@example.com") {
+		t.Fatalf("after Set state = %d %q", code, body)
+	}
+	if code, _ := get(t, client, env.BaseURL+"/_control/world/unknown"); code != http.StatusNotFound {
+		t.Fatalf("GET unknown external = %d, want 404", code)
 	}
 
-	// Fake fires the webhook with the Host override.
-	fire, err := http.DefaultClient.Post(env.FakeBase+"/fake/pay", "", nil)
+	// Fire forwards host verbatim; the app dispatches on req.Host.
+	fireBody := strings.NewReader(`{"host":"billing.app.example"}`)
+	fireResp, err := client.Post(env.BaseURL+"/_control/world/mail/fire", "application/json", fireBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = fire.Body.Close()
-	if fire.StatusCode != http.StatusOK {
-		t.Fatalf("POST /fake/pay = %d, want 200", fire.StatusCode)
+	var fired map[string]string
+	_ = json.NewDecoder(fireResp.Body).Decode(&fired)
+	_ = fireResp.Body.Close()
+	if fireResp.StatusCode != http.StatusOK || fired["host"] != "billing.app.example" {
+		t.Fatalf("POST fire = %d %v, want host echo", fireResp.StatusCode, fired)
 	}
-	mu.Lock()
-	gotHost := hookHost
-	mu.Unlock()
-	if gotHost != env.WebhookHost {
-		t.Fatalf("hook Host = %q, want %q", gotHost, env.WebhookHost)
+	if got := ext.fired(); got != "billing.app.example" {
+		t.Fatalf("external fired host = %q, want explicit host", got)
+	}
+	hookMu.Lock()
+	seen := hookSeen
+	hookMu.Unlock()
+	if seen != "billing.app.example" {
+		t.Fatalf("hook Host = %q, want explicit host", seen)
 	}
 
 	env.Close()
 	select {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("background service did not stop on Close")
+		t.Fatal("background did not stop on Close")
 	}
 }
