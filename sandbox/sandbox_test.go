@@ -418,3 +418,245 @@ func TestOpenFirstCapture(t *testing.T) {
 		t.Fatalf("GET /_control/state = %d %q, want seeded Describe", code, body)
 	}
 }
+
+func getHost(t *testing.T, client *http.Client, url, host string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+// TestExtraRawHatch locks Extra as the raw-handler escape hatch beside
+// Resources: it runs on the mount instance, so e.Any file-style routes
+// and Host-dispatched subdomains coexist with the typed app routes.
+func TestExtraRawHatch(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	cfg := testConfig(ext, &hookSeen, &hookMu)
+	keep := cfg.Mount.Extra
+	cfg.Mount.Extra = func(e *echo.Echo) {
+		keep(e)
+		e.Any("/files/*", func(c echo.Context) error {
+			return c.String(http.StatusOK, "file:"+c.Param("*"))
+		})
+		e.GET("/whoami", func(c echo.Context) error {
+			return c.String(http.StatusOK, c.Request().Host)
+		})
+	}
+	env, err := sandbox.Start(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	client := env.WebClient()
+
+	// The typed resource route is untouched.
+	if code, body := get(t, client, env.BaseURL+"/"); code != http.StatusOK || body != "hello" {
+		t.Fatalf("GET / = %d %q, want 200 hello", code, body)
+	}
+	// e.Any passthrough: methods Resources never declare.
+	if code, body := get(t, client, env.BaseURL+"/files/a.txt"); code != http.StatusOK || body != "file:a.txt" {
+		t.Fatalf("GET /files/a.txt = %d %q, want file body", code, body)
+	}
+	resp, err := client.Post(env.BaseURL+"/files/a.txt", "text/plain", strings.NewReader("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(raw) != "file:a.txt" {
+		t.Fatalf("POST /files/a.txt = %d %q, want Any passthrough", resp.StatusCode, raw)
+	}
+	// Subdomain-ish routing: same path, Host decides the shape.
+	if code, body := getHost(t, client, env.BaseURL+"/whoami", "live.app.example"); code != http.StatusOK || body != "live.app.example" {
+		t.Fatalf("GET /whoami Host=live = %d %q, want host echo", code, body)
+	}
+	if code, body := get(t, client, env.BaseURL+"/whoami"); code != http.StatusOK || !strings.Contains(body, "127.0.0.1") {
+		t.Fatalf("GET /whoami dial host = %d %q, want loopback host", code, body)
+	}
+}
+
+func payConfig(ext *stubExternal, hookSeen *string, hookMu *sync.Mutex) sandbox.Config {
+	cfg := testConfig(ext, hookSeen, hookMu)
+	mount := cfg.Mount
+	mount.Host = "billing.app.example"
+	keep := mount.Extra
+	mount.Extra = func(e *echo.Echo) {
+		keep(e)
+		// Pay-page-like GET: app page served beside the control plane.
+		e.GET("/pay/:id", func(c echo.Context) error {
+			return c.HTML(http.StatusOK, "<h1>checkout for "+c.Param("id")+"</h1>")
+		})
+		// Activate-like POST: world behavior through External methods
+		// only — Set marks active, Fire delivers the webhook.
+		e.POST("/pay/activate", func(c echo.Context) error {
+			var req struct {
+				Email string `json:"email"`
+				Host  string `json:"host"`
+			}
+			if err := c.Bind(&req); err != nil || req.Email == "" {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "email required"})
+			}
+			if err := ext.Set(map[string]any{"email": req.Email}); err != nil {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			host := req.Host
+			if host == "" {
+				host = mount.Host
+			}
+			if err := ext.Fire(host); err != nil {
+				return c.JSON(http.StatusBadGateway, map[string]string{"error": err.Error()})
+			}
+			return c.JSON(http.StatusOK, map[string]string{"activated": req.Email, "host": host})
+		})
+	}
+	cfg.Mount = mount
+	return cfg
+}
+
+// TestBehavioralPayFlow reconciles the Fakes-mux ask against the FINAL
+// contract: app pages via Extra, world behavior via External methods —
+// a pay-page-like GET plus an activate-like POST driving Set+Fire, with
+// no mux allowlist resurrected.
+func TestBehavioralPayFlow(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	env, err := sandbox.Start(payConfig(ext, &hookSeen, &hookMu))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	ext.mu.Lock()
+	ext.hookURL = env.BaseURL + "/hook"
+	ext.mu.Unlock()
+	client := env.WebClient()
+
+	if code, body := get(t, client, env.BaseURL+"/pay/member-1"); code != http.StatusOK || !strings.Contains(body, "member-1") {
+		t.Fatalf("GET /pay/member-1 = %d %q, want checkout page", code, body)
+	}
+
+	// Activate without a host: the Mount derivation fills it in.
+	activate := strings.NewReader(`{"email":"buyer@example.com"}`)
+	resp, err := client.Post(env.BaseURL+"/pay/activate", "application/json", activate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&done)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || done["activated"] != "buyer@example.com" || done["host"] != "billing.app.example" {
+		t.Fatalf("POST /pay/activate = %d %v, want buyer via Mount host", resp.StatusCode, done)
+	}
+	hookMu.Lock()
+	seen := hookSeen
+	hookMu.Unlock()
+	if seen != "billing.app.example" {
+		t.Fatalf("hook Host = %q, want Mount host", seen)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/world/mail"); code != http.StatusOK || !strings.Contains(body, "buyer@example.com") {
+		t.Fatalf("world after activate = %d %q, want buyer state", code, body)
+	}
+
+	// An explicit host overrides the Mount default.
+	activate = strings.NewReader(`{"email":"other@example.com","host":"pay.example"}`)
+	resp, err = client.Post(env.BaseURL+"/pay/activate", "application/json", activate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = map[string]string{}
+	_ = json.NewDecoder(resp.Body).Decode(&done)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || done["host"] != "pay.example" {
+		t.Fatalf("POST /pay/activate explicit = %d %v, want override", resp.StatusCode, done)
+	}
+}
+
+// TestMountHostDefault locks the host-mapping rule: a fire that omits the
+// host synthesizes Mount.Host instead of leaking the dial address, and an
+// explicit host still wins.
+func TestMountHostDefault(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	cfg := testConfig(ext, &hookSeen, &hookMu)
+	cfg.Mount.Host = "billing.app.example"
+	env, err := sandbox.Start(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	ext.mu.Lock()
+	ext.hookURL = env.BaseURL + "/hook"
+	ext.mu.Unlock()
+	client := env.WebClient()
+
+	fire := func(body string) map[string]string {
+		t.Helper()
+		resp, err := client.Post(env.BaseURL+"/_control/world/mail/fire", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST fire %q = %d %v", body, resp.StatusCode, out)
+		}
+		return out
+	}
+
+	if out := fire(`{}`); out["host"] != "billing.app.example" {
+		t.Fatalf("fire without host = %v, want Mount host", out)
+	}
+	hookMu.Lock()
+	seen := hookSeen
+	hookMu.Unlock()
+	if seen != "billing.app.example" {
+		t.Fatalf("hook Host = %q, want synthesized Mount host", seen)
+	}
+	if out := fire(`{"host":"other.example"}`); out["host"] != "other.example" {
+		t.Fatalf("fire explicit host = %v, want override", out)
+	}
+}
+
+// TestSingleIdentityScope locks the deferred As decision: cookie jars do
+// not partition state. Identity swaps through reseed, not concurrent
+// scopes, because the stores are shared in-process.
+func TestSingleIdentityScope(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	env, err := sandbox.Start(testConfig(ext, &hookSeen, &hookMu))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	a, b := env.WebClient(), env.WebClient()
+
+	if _, body := get(t, a, env.BaseURL+"/_control/state"); !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("jar A state = %q, want default Describe", body)
+	}
+	if _, body := get(t, b, env.BaseURL+"/_control/state"); !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("jar B state = %q, want same shared state", body)
+	}
+	if err := env.Seed("beta"); err != nil {
+		t.Fatal(err)
+	}
+	// Both jars observe the reseed: no per-scope isolation exists.
+	for name, c := range map[string]*http.Client{"A": a, "B": b} {
+		if _, body := get(t, c, env.BaseURL+"/_control/state"); !strings.Contains(body, "beta@example.com") {
+			t.Fatalf("jar %s after reseed = %q, want shared beta state", name, body)
+		}
+	}
+}

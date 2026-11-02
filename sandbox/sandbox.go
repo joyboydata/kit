@@ -26,6 +26,30 @@
 // mount address yet set req.Host explicitly to the app-facing host;
 // External.Fire receives that host verbatim for exactly this reason,
 // and Env.WebClient preserves Host while dialing the mount port.
+//
+// Raw escape hatch: Mount.Extra runs on the same echo instance as the
+// app, so anything Resources cannot declare — e.Any("/*") file serving,
+// Host-dispatched subdomains, extra methods — lives there. Extra IS the
+// hatch on purpose: a second raw slot would duplicate it with no extra
+// power. Resources stay the typed home for app URLs; Extra is the raw
+// one beside them.
+//
+// Host mapping: the mount is single-port, so a fire cannot infer the
+// app-facing host from the dial address (the trap above). Mount.Host
+// names the host the app would see in production; an empty fire host
+// falls back to it, and an explicit per-fire host overrides it.
+//
+// Behavior control: there is no Fakes mux. World behavior goes through
+// External methods (Set/Fire/Reset over the world routes) and app pages
+// plus action endpoints through Extra — e.g. a checkout GET plus an
+// activate POST that drives Set+Fire. A behavior neither can express is
+// a deliberate contract gap: add the minimal slot and say so loudly.
+//
+// Identity: one fixture identity per run. Reseed swaps the identity
+// through seeds the way fixtures do, and a fresh harness is a cheap full
+// reset. There is no As scoping because the stores are shared
+// in-process — a scoped handle would fake an isolation the harness does
+// not enforce.
 package sandbox
 
 import (
@@ -57,10 +81,16 @@ type Dirs struct {
 	Forks string
 }
 
-// Mount is one app shape on one port. Extra adds app action tweaks as
-// POSTs beside the control plane; nil means the pure flow.
+// Mount is one app shape on one port. Extra is the raw-handler escape
+// hatch beside Resources: it runs on the mount instance, so it can add
+// e.Any routes, Host-dispatched subdomains, or methods Resources cannot
+// declare. Nil means the pure flow.
 type Mount struct {
-	App   v2.App
+	App v2.App
+	// Host is the app-facing host synthesized for fires that omit one
+	// (e.g. "app.<rootDomain>"). The app overrides the default by
+	// setting it; an explicit per-fire host always wins.
+	Host  string
 	Extra func(e *echo.Echo)
 }
 
@@ -459,6 +489,12 @@ func (h *harness) servePostFireOne(c echo.Context) error {
 		if err := c.Bind(&req); err == nil {
 			host = req.Host
 		}
+	}
+	// Single-port mount, so the dial address never names the app-facing
+	// host (domain trap): fall back to the Mount derivation before the
+	// raw request host.
+	if host == "" {
+		host = h.mount.Host
 	}
 	if host == "" {
 		host = c.Request().Host
