@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -285,5 +287,134 @@ func TestWorldFireBackground(t *testing.T) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("background did not stop on Close")
+	}
+}
+
+// captureStore is Open-created state shared by Mount handlers and seeds.
+// Close marks shutdown; reseed must never close it.
+type captureStore struct {
+	mu     sync.Mutex
+	msg    string
+	dirs   sandbox.Dirs
+	closed bool
+}
+
+func (s *captureStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return nil
+}
+
+func (s *captureStore) get() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.msg
+}
+
+func (s *captureStore) set(msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.msg = msg
+}
+
+// TestOpenFirstCapture proves the Open-first order: Open builds state
+// from kit Dirs, Build threads it into the Mount and seeds, and reseed
+// keeps the same handle instead of reopening.
+func TestOpenFirstCapture(t *testing.T) {
+	openCalls := 0
+	var opened *captureStore
+	var buildDirs sandbox.Dirs
+
+	cfg := sandbox.Config{
+		Open: func(d sandbox.Dirs) (io.Closer, error) {
+			openCalls++
+			// kit Dirs already exist; capture-style apps use them directly.
+			for _, dir := range []string{d.Data, d.Apps, d.Forks} {
+				if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+					return nil, fmt.Errorf("sandbox: missing dir %s", dir)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(d.Data, "marker.txt"), []byte("kit-dirs"), 0o644); err != nil {
+				return nil, err
+			}
+			opened = &captureStore{msg: "open-created", dirs: d}
+			return opened, nil
+		},
+		Build: func(d sandbox.Dirs, handle io.Closer) (sandbox.Built, error) {
+			st, ok := handle.(*captureStore)
+			if !ok {
+				return sandbox.Built{}, fmt.Errorf("sandbox: handle is %T, want *captureStore", handle)
+			}
+			buildDirs = d
+			app := v2.App{
+				Resources: []v2.Resource{
+					{
+						Path: "/",
+						Representations: []v2.Representation{
+							{Name: "", Handler: func(c echo.Context) (templ.Component, error) {
+								raw, err := os.ReadFile(filepath.Join(st.dirs.Data, "marker.txt"))
+								marker := "missing"
+								if err == nil {
+									marker = string(raw)
+								}
+								return text(st.get() + "|" + marker), nil
+							}},
+						},
+					},
+				},
+			}
+			return sandbox.Built{
+				Mount: sandbox.Mount{App: app},
+				Seeds: map[string]func(ctx context.Context) error{
+					"greet": func(_ context.Context) error {
+						st.set("seeded-hi")
+						return nil
+					},
+				},
+				Describe: func() any { return st.get() },
+			}, nil
+		},
+	}
+	env, err := sandbox.Start(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	if openCalls != 1 {
+		t.Fatalf("openCalls = %d, want 1 before reseed", openCalls)
+	}
+	if buildDirs.Data != opened.dirs.Data {
+		t.Fatalf("Build dirs = %q, want Open dirs %q", buildDirs.Data, opened.dirs.Data)
+	}
+	first := opened
+	client := env.WebClient()
+
+	// Handler sees Open-created state plus the kit-Dirs marker file.
+	if code, body := get(t, client, env.BaseURL+"/"); code != http.StatusOK || body != "open-created|kit-dirs" {
+		t.Fatalf("GET / = %d %q, want Open-created state", code, body)
+	}
+
+	// Reseed runs the seed on the same store; the handle is stable.
+	if err := env.Seed("greet"); err != nil {
+		t.Fatal(err)
+	}
+	if openCalls != 1 {
+		t.Fatalf("openCalls = %d after reseed, want stable handle (1)", openCalls)
+	}
+	if opened != first {
+		t.Fatal("handle replaced across reseed, want stable identity")
+	}
+	opened.mu.Lock()
+	closed := opened.closed
+	opened.mu.Unlock()
+	if closed {
+		t.Fatal("handle closed across reseed, want close-once on Close")
+	}
+	if code, body := get(t, client, env.BaseURL+"/"); code != http.StatusOK || !strings.HasPrefix(body, "seeded-hi|") {
+		t.Fatalf("GET / after reseed = %d %q, want seeded state on same handle", code, body)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "seeded-hi") {
+		t.Fatalf("GET /_control/state = %d %q, want seeded Describe", code, body)
 	}
 }

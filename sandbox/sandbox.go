@@ -9,7 +9,17 @@
 // state enters through Config seeds and leaves through Describe, with
 // the lifecycle handle as io.Closer. The harness creates a throwaway
 // root per run, wipes the buckets on reseed, and removes it on Close,
-// so seeds and Open never manage temp lifetime themselves.
+// so seeds never manage temp lifetime themselves.
+//
+// Order is Open -> Build -> Register -> Default seed. Start makes the
+// throwaway Dirs, calls Open once (nil keeps Mount.App as-is with no
+// builder), threads the handle plus Dirs into Build to derive the Mount
+// (capture-style builders close over the concrete Open-created stores
+// via kit Dirs directly), then registers Mount.App (+ Extra) and runs
+// the Default seed. Open owns the handle lifetime: it closes once on
+// Close, never across reseed, so runner subscriptions and handler
+// captures stay stable; reseed hermeticity comes from wiping the
+// buckets plus External.Reset, not from replacing objects.
 //
 // Domain trap: apps that dispatch on Host (subdomain routers) serve the
 // wrong shape on a bare 127.0.0.1 URL. A webhook fire must dial the
@@ -66,16 +76,30 @@ type External interface {
 	Reset()
 }
 
+// Built is the Open-derived app surface. Mount handlers and seed
+// funcs close over the same Open-created stores, so reseed never
+// replaces them out from under the running mount.
+type Built struct {
+	Mount    Mount
+	Seeds    map[string]func(ctx context.Context) error
+	Describe func() any
+}
+
 // Config wires the run. Describe snapshots state for GET
 // /_control/state (nil renders null). Background starters run after the
 // default seed and stop on Close; they must tolerate reseed wiping the
-// buckets underneath them.
+// buckets underneath them. Open creates the stores from the throwaway
+// Dirs once before Register (nil keeps Mount.App as-is, no builder).
+// Build derives Mount/Seeds/Describe from the Open handle plus Dirs
+// once before Register; nil keeps the Config values as-is. A non-nil
+// Seeds/Describe inside Built replaces the Config one; nil keeps it.
 type Config struct {
 	Mount      Mount
 	Externals  []External
 	Seeds      map[string]func(ctx context.Context) error
 	Default    string
 	Open       func(d Dirs) (io.Closer, error)
+	Build      func(d Dirs, handle io.Closer) (Built, error)
 	Describe   func() any
 	Background []func(ctx context.Context) error
 }
@@ -112,10 +136,38 @@ func Start(cfg Config) (*Env, error) {
 	}
 
 	h := &harness{cfg: cfg, dirs: dirs, root: root}
+	h.mount = cfg.Mount
+	h.seeds = cfg.Seeds
+	h.describeFn = cfg.Describe
+
+	// Open-first: stores exist before the mount registers, so builders
+	// close over kit Dirs directly instead of a caller-owned mirror.
+	if err := h.open(); err != nil {
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
+	if cfg.Build != nil {
+		built, err := cfg.Build(dirs, h.handle)
+		if err != nil {
+			if h.handle != nil {
+				_ = h.handle.Close()
+				h.handle = nil
+			}
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
+		h.mount = built.Mount
+		if built.Seeds != nil {
+			h.seeds = built.Seeds
+		}
+		if built.Describe != nil {
+			h.describeFn = built.Describe
+		}
+	}
 
 	e := echo.New()
 	e.HideBanner = true
-	cfg.Mount.App.Register(e)
+	h.mount.App.Register(e)
 	e.GET("/_control/state", h.serveGetState)
 	e.PUT("/_control/state", h.servePutState)
 	e.POST("/_control/seed", h.servePostSeed)
@@ -124,24 +176,24 @@ func Start(cfg Config) (*Env, error) {
 	e.GET("/_control/world/:name", h.serveGetWorldOne)
 	e.PUT("/_control/world/:name", h.servePutWorldOne)
 	e.POST("/_control/world/:name/fire", h.servePostFireOne)
-	if cfg.Mount.Extra != nil {
-		cfg.Mount.Extra(e)
+	if h.mount.Extra != nil {
+		h.mount.Extra(e)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		if h.handle != nil {
+			_ = h.handle.Close()
+			h.handle = nil
+		}
 		_ = os.RemoveAll(root)
 		return nil, err
 	}
 	h.srv = &http.Server{Handler: e}
 
-	if err := h.open(); err != nil {
-		_ = ln.Close()
-		_ = os.RemoveAll(root)
-		return nil, err
-	}
 	if cfg.Default != "" {
 		if err := h.reseed(cfg.Default); err != nil {
+			_ = ln.Close()
 			h.shutdown(context.Background())
 			return nil, err
 		}
@@ -232,14 +284,20 @@ func Run(cfg Config) error {
 	return nil
 }
 
-// harness owns the mutable run state; only reseed mutates it.
+// harness owns the mutable run state; only reseed mutates scenario.
+// mount/seeds/describeFn are the effective values: Config's, replaced
+// by Build's non-nil results before Register. The handle opens once
+// and closes once; reseed never touches it.
 type harness struct {
-	mu       sync.Mutex
-	cfg      Config
-	dirs     Dirs
-	root     string
-	handle   io.Closer
-	scenario string
+	mu         sync.Mutex
+	cfg        Config
+	dirs       Dirs
+	root       string
+	handle     io.Closer
+	mount      Mount
+	seeds      map[string]func(ctx context.Context) error
+	describeFn func() any
+	scenario   string
 
 	srv  *http.Server
 	stop context.CancelFunc
@@ -258,20 +316,17 @@ func (h *harness) open() error {
 	return nil
 }
 
-// reseed wipes the buckets, resets externals, reopens the handle, and
-// runs the scenario. Empty means wipe-only. A fresh handle per scenario
-// keeps runs hermetic.
+// reseed wipes the buckets, resets externals, and runs the scenario.
+// Empty means wipe-only. The Open handle stays stable across reseed so
+// Mount captures and runner subscriptions survive; hermeticity comes
+// from the wipe plus Reset, not from reopening.
 func (h *harness) reseed(scenario string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	seed, ok := h.cfg.Seeds[scenario]
+	seed, ok := h.seeds[scenario]
 	if scenario != "" && !ok {
 		return fmt.Errorf("sandbox: unknown scenario %q", scenario)
-	}
-	if h.handle != nil {
-		_ = h.handle.Close()
-		h.handle = nil
 	}
 	for _, d := range []string{h.dirs.Data, h.dirs.Apps, h.dirs.Forks} {
 		if err := os.RemoveAll(d); err != nil {
@@ -286,9 +341,6 @@ func (h *harness) reseed(scenario string) error {
 			ext.Reset()
 		}
 	}
-	if err := h.open(); err != nil {
-		return err
-	}
 	if seed != nil {
 		if err := seed(context.Background()); err != nil {
 			return err
@@ -299,10 +351,10 @@ func (h *harness) reseed(scenario string) error {
 }
 
 func (h *harness) describe() any {
-	if h.cfg.Describe == nil {
+	if h.describeFn == nil {
 		return nil
 	}
-	return h.cfg.Describe()
+	return h.describeFn()
 }
 
 func (h *harness) report() map[string]any {
@@ -354,7 +406,7 @@ func (h *harness) servePostSeed(c echo.Context) error {
 
 func (h *harness) serveScenarios(c echo.Context) error {
 	out := []string{}
-	for name := range h.cfg.Seeds {
+	for name := range h.seeds {
 		out = append(out, name)
 	}
 	sort.Strings(out)
