@@ -32,6 +32,16 @@ func (e Errors) loginPath() string {
 	return e.LoginPath
 }
 
+// HandleError adapts the App's error policy to echo.HTTPErrorHandler
+// for errors Echo catches outside v2 handlers (unknown routes, binds,
+// middleware aborts). Committed responses pass through untouched.
+func (a App) HandleError(err error, c echo.Context) {
+	if c.Response().Committed {
+		return
+	}
+	_ = a.writeError(c, err)
+}
+
 // writeError maps a Handler error onto the wire shape above. Direct
 // (non-HTMX) visits get the same semantics without HTMX headers: a 303
 // to login for 402, a layout-wrapped alert for 4xx, a generic message
