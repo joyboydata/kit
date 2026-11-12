@@ -1,0 +1,75 @@
+# hxchat browser cases — agent-executed, driver-gated, same seeds as the
+# serve harness (hxchat/sandbox/serve). Programmatic gates live in Go
+# (hxchat/chat_test.go: serve contract, mutations, streams, goldens);
+# these rows prove user-observable behavior in a real headless browser
+# with JavaScript enabled — never curl, never a raw HTTP client.
+#
+# RUNNER CONTRACT (the executor is an agent with browser tools):
+# - Boot: `go run ./hxchat/sandbox/serve` from the kit root — prints the
+#   base URL on stdout; drive that. Ctrl-C tears it down.
+# - Reseed before each row: PUT /_control/state {"scenario":"<seed>"}.
+#   Seeds are deterministic: "empty" (no events), "history" (one
+#   finished turn on t1: "hey"/"hello back"), "failed" (history plus a
+#   RUN_ERROR terminal on t1). Page URLs name the thread: /chat/t1.
+# - Scripted runner (behavior by composer text): "fail" fails the run,
+#   "slow ..." streams "one two three" over ~1s, anything else echoes
+#   "echo: <text>" fast.
+# - Verbs: goto/assertConsoleClean/assertExists/click/type/assertVisible/
+#   assertNoNavigation. type takes {sel, text} and types into the
+#   composer textarea; waits are event-bounded (within: 2s default 5s);
+#   console errors hard-fail the row. The element exposes its EventSource
+#   as document.querySelector('chat-thread')._es for the reconnect row.
+# - expect: prose the agent verifies with judgment (trace as evidence).
+- group: flows                # golden paths end to end
+  cases:
+    - name: send-lock-stream-unlock
+      seed: empty
+      steps:
+        - goto: /chat/t1
+        - assertConsoleClean: {}
+        - assertExists: chat-thread textarea[name="text"]
+        - type: { sel: 'chat-thread textarea[name="text"]', text: slow hello }
+        - click: 'chat-thread button[type="submit"]'
+        - assertVisible: { sel: 'chat-thread [data-chat-region="composer"] [disabled]', within: 2s }
+        - assertVisible: { sel: 'chat-thread [data-phase="running"]', within: 2s }
+        - assertVisible: { sel: 'chat-thread [data-chat-region="messages"]', within: 5s }
+        - assertNoNavigation: {}
+      expect: composer locks (disabled + Working...) while the run streams, then unlocks with "one two three" in the messages region and status Ready; no page navigation occurs.
+
+    - name: error-retry
+      seed: empty
+      steps:
+        - goto: /chat/t1
+        - assertConsoleClean: {}
+        - type: { sel: 'chat-thread textarea[name="text"]', text: fail }
+        - click: 'chat-thread button[type="submit"]'
+        - assertVisible: { sel: 'chat-thread [role="alert"]', within: 5s }
+        - assertVisible: { sel: 'chat-thread [data-chat-retry] button', within: 2s }
+        - click: 'chat-thread [data-chat-retry] button'
+        - assertVisible: { sel: 'chat-thread [data-chat-region="messages"]', within: 5s }
+        - assertNoNavigation: {}
+      expect: the run fails into role=alert with "model blew up (E_MODEL)" and a Retry button; retry posts a new run (parent_run set) that succeeds to "echo: Retry" and the composer unlocks.
+
+- group: robustness          # browser-only breakage
+  cases:
+    - name: reconnect-replay
+      seed: empty
+      steps:
+        - goto: /chat/t1
+        - assertConsoleClean: {}
+        - type: { sel: 'chat-thread textarea[name="text"]', text: slow test }
+        - click: 'chat-thread button[type="submit"]'
+        - assertVisible: { sel: 'chat-thread [data-phase="running"]', within: 2s }
+      expect: mid-run, kill the stream via eval (document.querySelector('chat-thread')._es.close()); the element reopens within a second (new _es), Replay converges, and the messages region ends with "one two three" and an unlocked composer. Console stays clean.
+
+    - name: two-mount-isolation
+      seed: empty
+      steps:
+        - goto: /chat/t1?two=1
+        - assertConsoleClean: {}
+        - assertExists: chat-thread:nth-of-type(2)
+        - type: { sel: 'chat-thread textarea[name="text"]', text: hello }
+        - click: 'chat-thread button[type="submit"]'
+        - assertVisible: { sel: 'chat-thread [data-chat-region="messages"]', within: 5s }
+        - assertNoNavigation: {}
+      expect: both mounts show "echo: hello" (same thread converges both), each keeps its own ?hxchatns= stream (eval both _es URLs: ns values differ), and the console stays clean.

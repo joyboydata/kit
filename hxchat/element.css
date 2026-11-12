@@ -1,0 +1,114 @@
+/* hxchat default theme. Override with CSS vars on chat-thread, or
+ * scope a palette with data-theme. Light DOM: plain selectors win. */
+chat-thread {
+  --hxchat-bg: #fff;
+  --hxchat-fg: #1a1a1a;
+  --hxchat-muted: #6b7280;
+  --hxchat-accent: #2563eb;
+  --hxchat-border: #e5e7eb;
+  --hxchat-error: #b91c1c;
+  --hxchat-radius: 8px;
+  --hxchat-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: block;
+  background: var(--hxchat-bg);
+  color: var(--hxchat-fg);
+  font-family: var(--hxchat-font);
+}
+
+chat-thread[data-theme="comic"] {
+  --hxchat-bg: #fffbe6;
+  --hxchat-fg: #22201a;
+  --hxchat-accent: #d946ef;
+  --hxchat-border: #22201a;
+  --hxchat-radius: 12px;
+}
+
+.hxchat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 44rem;
+}
+
+.hxchat-msg {
+  border: 1px solid var(--hxchat-border);
+  border-radius: var(--hxchat-radius);
+  padding: 0.5rem 0.75rem;
+}
+
+.hxchat-msg[data-role="user"] {
+  border-style: dashed;
+}
+
+.hxchat-msg p {
+  margin: 0 0 0.25rem;
+}
+
+.hxchat-msg p:last-child {
+  margin-bottom: 0;
+}
+
+.hxchat-tool {
+  border-top: 1px dotted var(--hxchat-border);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  font-size: 0.875em;
+}
+
+.hxchat-tool-name {
+  font-weight: 600;
+}
+
+.hxchat-tool-args,
+.hxchat-tool-result {
+  background: color-mix(in srgb, var(--hxchat-fg) 4%, transparent);
+  border-radius: calc(var(--hxchat-radius) / 2);
+  padding: 0.25rem 0.5rem;
+  overflow-x: auto;
+}
+
+.hxchat-composer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.hxchat-composer textarea {
+  flex: 1;
+  font: inherit;
+  border: 1px solid var(--hxchat-border);
+  border-radius: var(--hxchat-radius);
+  padding: 0.5rem;
+  resize: vertical;
+}
+
+.hxchat-composer button {
+  font: inherit;
+  background: var(--hxchat-accent);
+  color: #fff;
+  border: 0;
+  border-radius: var(--hxchat-radius);
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+.hxchat-composer button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.hxchat-status {
+  font-size: 0.875em;
+  color: var(--hxchat-muted);
+}
+
+.hxchat-error {
+  border: 1px solid var(--hxchat-error);
+  border-radius: var(--hxchat-radius);
+  padding: 0.5rem 0.75rem;
+}
+
+.hxchat-error p {
+  margin: 0 0 0.5rem;
+  color: var(--hxchat-error);
+}

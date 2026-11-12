@@ -1,0 +1,1 @@
+<div class="hxchat-msg" data-role="assistant" data-message-id="m2"><p>Hi there</p><div class="hxchat-tool" data-tool-call-id="t1"><span class="hxchat-tool-name">search</span><pre class="hxchat-tool-args">{&#34;q&#34;:&#34;x&#34;}</pre><pre class="hxchat-tool-result">ok</pre></div></div>

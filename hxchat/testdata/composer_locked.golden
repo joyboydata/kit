@@ -1,0 +1,1 @@
+<form class="hxchat-composer" data-chat-composer method="post" action="abc/messages"><textarea name="text" rows="2" placeholder="Write a message..." disabled aria-disabled="true"></textarea><button type="submit" disabled aria-disabled="true">Working...</button></form>

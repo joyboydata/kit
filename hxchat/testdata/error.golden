@@ -1,0 +1,1 @@
+<div class="hxchat-error" role="alert"><p>model blew up (E_MODEL)</p><form method="post" action="abc/messages" data-chat-retry><input type="hidden" name="text" value="Retry"><input type="hidden" name="parent_run" value="r9"><button type="submit">Retry</button></form></div>
