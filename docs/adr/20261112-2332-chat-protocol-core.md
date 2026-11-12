@@ -7,7 +7,7 @@ Supersedes: apliq `20261112-2320-chat-protocol-core.md` (moved to owning repo)
 
 ## Decision
 
-1. Extract the AG-UI 1.0 minimal core (runs + steps + text + tool + reasoning, 20 of 31 event types) into a stdlib-only, frozen `kit/chat` package: envelope + `Log` + `Emitter` + `Encode`/`Decode`/`Fold`.
+1. Extract the AG-UI 1.0 minimal core (runs + steps + text + tool + reasoning, 20 of 31 event types) into a stdlib-only, frozen `kit/agui` package: envelope + `Log` + `Emitter` + `Encode`/`Decode`/`Fold`.
 2. Ship one higher-level adapter, `kit/hxchat`, over hxkit v2 with exactly two seams (`Store`, `Runner`) and per-region `Render*` slots defaulting to public `Default*View` renderers.
 3. Make the mount a custom element `<chat-thread>` (attributes `thread`/`src`/`stream`/`post`, auto-minted isolation, `theme` hook) with **HTML frames** as the wire format — the element swaps server-rendered fragments, never templates JSON.
 4. Freeze the forward-compat rule: `Event` fields additive-optional only; unknown types decode-and-ignore; `Fold` gains per-family rules without touching message derivation.
@@ -67,7 +67,7 @@ Tradeoffs: + smallest wire, full client control; − duplicates `Fold`/dedup/ter
 
 Positive:
 
-- `chat` has no Echo/templ/ADK/bbolt imports: importable by any future project; apliq migrates its `RunEvent`/`RunBridge` onto it.
+- `agui` has no Echo/templ/ADK/bbolt imports: importable by any future project; apliq migrates its `RunEvent`/`RunBridge` onto it.
 - UI updates ship with the Go binary: slot override → next stream frame carries new HTML; `Replay` reconverges late joiners; no client bundle skew.
 - Extension without forking: unset slot = default; set slot = decorator around `Default*View`, whose HTML is a golden-tested contract.
 - Reliability policy frozen once: idempotent append on `runId`/`messageId`, mutation returns `Hold` (stream pushes truth), `Tick` debounce + identical-frame dedup, `Terminal` close, retry as new run with `ParentRunId`.
@@ -86,7 +86,7 @@ Forward-compat mechanism (the freeze holds while the spec grows):
 
 Order:
 
-1. `kit/chat`: `Event` (20 types), `RunInput`, `Message`, `ToolCall`, `Usage`, `Log`, `Emitter`, `Encode`/`Decode`/`Fold` + contract tests (ordering, triad discipline, absent-means-absent, golden fold).
+1. `kit/agui`: `Event` (20 types), `RunInput`, `Message`, `ToolCall`, `Usage`, `Log`, `Emitter`, `Encode`/`Decode`/`Fold` + contract tests (ordering, triad discipline, absent-means-absent, golden fold).
 
 ```go
 func NewLog(threadID string) *Log
@@ -100,13 +100,13 @@ func Fold(events []Event) []Message
 
 ```go
 type Store interface {
-  Append(threadID string, e chat.Event) (chat.Event, error)
-  List(threadID string) []chat.Event
+  Append(threadID string, e agui.Event) (agui.Event, error)
+  List(threadID string) []agui.Event
   Subscribe(threadID string) (<-chan struct{}, func())
 }
 
 type Runner interface {
-  Run(ctx context.Context, in chat.RunInput, em *chat.Emitter) error
+  Run(ctx context.Context, in agui.RunInput, em *agui.Emitter) error
 }
 
 func (c *Chat) Tag(m Mount) templ.Component
@@ -116,12 +116,12 @@ func (c *Chat) Head() templ.Component
 3. apliq adoption: `Options.Path = "/apps/:id/revisions/:rid"`, add `?view=thread` representation delegating to existing transcript renderers, wrap dialog in `<chat-thread>`; `Head()` once in dashboard layout.
 4. Sandbox coverage: stub-model run → frames → `Fold` assertions + browser case (send, stream, lock, retry).
 
-Package layout: `kit/chat/*` (stdlib only), `kit/hxchat/*` (`element.js`, `element.css`, `chat.go`, `defaults.go`, `*_test.go`).
+Package layout: `kit/agui/*` (stdlib only), `kit/hxchat/*` (`element.js`, `element.css`, `chat.go`, `defaults.go`, `*_test.go`).
 
-### Surface: `kit/chat`
+### Surface: `kit/agui`
 
 ```go
-package chat // github.com/joyboydata/kit/chat
+package agui // github.com/joyboydata/kit/agui
 
 type EventType string // 20 values: RUN_STARTED/FINISHED/ERROR, STEP_STARTED/FINISHED,
                        // TEXT_MESSAGE_{START,CONTENT,END,CHUNK}, TOOL_CALL_{START,ARGS,END,CHUNK,RESULT},
@@ -166,12 +166,12 @@ func Fold(events []Event) []Message
 package hxchat // github.com/joyboydata/kit/hxchat
 
 type Store interface {
-  Append(threadID string, e chat.Event) (chat.Event, error)
-  List(threadID string) []chat.Event
+  Append(threadID string, e agui.Event) (agui.Event, error)
+  List(threadID string) []agui.Event
   Subscribe(threadID string) (<-chan struct{}, func())
 }
 type Runner interface {
-  Run(ctx context.Context, in chat.RunInput, em *chat.Emitter) error
+  Run(ctx context.Context, in agui.RunInput, em *agui.Emitter) error
 }
 type RunState struct { Phase, RunID string }
 type Mount struct { ThreadID, Prefix, Theme string }
@@ -179,8 +179,8 @@ type Options struct {
   Path string; Tick time.Duration
   ThreadID func(c echo.Context) string
   Prefix func(c echo.Context) string; Theme string
-  RenderThread func(m Mount, msgs []chat.Message) templ.Component
-  RenderMessage func(m Mount, msg chat.Message) templ.Component
+  RenderThread func(m Mount, msgs []agui.Message) templ.Component
+  RenderMessage func(m Mount, msg agui.Message) templ.Component
   RenderComposer func(m Mount, locked bool) templ.Component
   RenderStatus func(m Mount, s RunState) templ.Component
   RenderError func(m Mount, err error, runID string) templ.Component
@@ -193,8 +193,8 @@ func (c *Chat) Head() templ.Component
 func (c *Chat) StreamURL(m Mount) string
 
 func New(store Store, runner Runner, opts Options) *Chat
-func DefaultThreadView(m Mount, msgs []chat.Message) templ.Component
-func DefaultMessageView(m Mount, msg chat.Message) templ.Component
+func DefaultThreadView(m Mount, msgs []agui.Message) templ.Component
+func DefaultMessageView(m Mount, msg agui.Message) templ.Component
 func DefaultComposerView(m Mount, locked bool) templ.Component
 func DefaultStatusView(m Mount, s RunState) templ.Component
 func DefaultErrorView(m Mount, err error, runID string) templ.Component
