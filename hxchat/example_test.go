@@ -9,19 +9,19 @@ import (
 
 	"github.com/a-h/templ"
 
-	"github.com/joyboydata/kit/chat"
+	"github.com/joyboydata/kit/agui"
 	"github.com/joyboydata/kit/hxchat"
 )
 
 // stubStore is a minimal in-memory Store for the examples.
 type stubStore struct {
 	mu     sync.Mutex
-	events map[string][]chat.Event
+	events map[string][]agui.Event
 }
 
-func newStubStore() *stubStore { return &stubStore{events: map[string][]chat.Event{}} }
+func newStubStore() *stubStore { return &stubStore{events: map[string][]agui.Event{}} }
 
-func (s *stubStore) Append(threadID string, e chat.Event) (chat.Event, error) {
+func (s *stubStore) Append(threadID string, e agui.Event) (agui.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.ThreadID = threadID
@@ -29,10 +29,10 @@ func (s *stubStore) Append(threadID string, e chat.Event) (chat.Event, error) {
 	return e, nil
 }
 
-func (s *stubStore) List(threadID string) []chat.Event {
+func (s *stubStore) List(threadID string) []agui.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]chat.Event(nil), s.events[threadID]...)
+	return append([]agui.Event(nil), s.events[threadID]...)
 }
 
 func (s *stubStore) Subscribe(threadID string) (<-chan struct{}, func()) {
@@ -82,7 +82,7 @@ func ExampleChat_StreamURL() {
 // the Default, never reimplement it. Unset slots stay stock; a set slot
 // wraps the stock renderer and the thread picks it up per message.
 func ExampleDefaultMessageView_wrap() {
-	decorated := func(m hxchat.Mount, msg chat.Message) templ.Component {
+	decorated := func(m hxchat.Mount, msg agui.Message) templ.Component {
 		inner := hxchat.DefaultMessageView(m, msg)
 		return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 			if _, err := io.WriteString(w, `<section class="wrap">`); err != nil {
@@ -96,7 +96,7 @@ func ExampleDefaultMessageView_wrap() {
 		})
 	}
 	var b strings.Builder
-	msg := chat.Message{ID: "m1", Role: "user", Text: "hi"}
+	msg := agui.Message{ID: "m1", Role: "user", Text: "hi"}
 	if err := decorated(hxchat.Mount{ThreadID: "abc"}, msg).Render(context.Background(), &b); err != nil {
 		panic(err)
 	}

@@ -13,7 +13,7 @@ import (
 	"github.com/a-h/templ"
 	"github.com/labstack/echo/v4"
 
-	"github.com/joyboydata/kit/chat"
+	"github.com/joyboydata/kit/agui"
 	v2 "github.com/joyboydata/kit/hxkit/v2"
 )
 
@@ -21,8 +21,8 @@ import (
 // thread and signal every Subscribe channel on each Append, so streams
 // wake without polling. Append assigns ordering; List returns Seq order.
 type Store interface {
-	Append(threadID string, e chat.Event) (chat.Event, error)
-	List(threadID string) []chat.Event
+	Append(threadID string, e agui.Event) (agui.Event, error)
+	List(threadID string) []agui.Event
 	Subscribe(threadID string) (<-chan struct{}, func())
 }
 
@@ -30,7 +30,7 @@ type Store interface {
 // it with FinishRun or FailRun; a returned error is backstopped into
 // FailRun so every run ends terminal. ctx is detached from the POST.
 type Runner interface {
-	Run(ctx context.Context, in chat.RunInput, em *chat.Emitter) error
+	Run(ctx context.Context, in agui.RunInput, em *agui.Emitter) error
 }
 
 // RunState is the folded lifecycle of a thread: the latest run is open
@@ -68,8 +68,8 @@ type Options struct {
 	Prefix   func(c echo.Context) string
 	Theme    string
 
-	RenderThread   func(m Mount, msgs []chat.Message) templ.Component
-	RenderMessage  func(m Mount, msg chat.Message) templ.Component
+	RenderThread   func(m Mount, msgs []agui.Message) templ.Component
+	RenderMessage  func(m Mount, msg agui.Message) templ.Component
 	RenderComposer func(m Mount, locked bool) templ.Component
 	RenderStatus   func(m Mount, s RunState) templ.Component
 	RenderError    func(m Mount, err error, runID string) templ.Component
@@ -222,7 +222,7 @@ func (c *Chat) serveThread(ctx echo.Context) (templ.Component, error) {
 	m := c.mountFor(ctx, threadID)
 	events := c.store.List(threadID)
 	locked, st, rerr := foldRun(events)
-	return c.renderThread(m, chat.Fold(events), locked, st, rerr), nil
+	return c.renderThread(m, agui.Fold(events), locked, st, rerr), nil
 }
 
 // serveMessages appends the user turn, opens the run synchronously so
@@ -235,14 +235,14 @@ func (c *Chat) serveMessages(ctx echo.Context) (templ.Component, error) {
 		return nil, v2.E(400, "text is required")
 	}
 
-	runLog := chat.NewLog(threadID)
-	em := chat.NewEmitter(runLog)
+	runLog := agui.NewLog(threadID)
+	em := agui.NewEmitter(runLog)
 	msgID, runID := newID("m"), newID("r")
-	in := chat.RunInput{
+	in := agui.RunInput{
 		ThreadID:    threadID,
 		RunID:       runID,
 		ParentRunID: ctx.FormValue("parent_run"),
-		Message:     chat.Message{ID: msgID, Role: "user", Text: text},
+		Message:     agui.Message{ID: msgID, Role: "user", Text: text},
 	}
 	if err := em.StartRun(in); err != nil {
 		return nil, v2.E(500, "could not open run")
@@ -267,7 +267,7 @@ func (c *Chat) serveMessages(ctx echo.Context) (templ.Component, error) {
 // execute runs the runner while forwarding its log into the store, then
 // drains. A returned error becomes FailRun when the runner left the run
 // open, so every run ends terminal and the stream closes.
-func (c *Chat) execute(ctx context.Context, threadID string, in chat.RunInput, em *chat.Emitter, runLog *chat.Log, sent int) {
+func (c *Chat) execute(ctx context.Context, threadID string, in agui.RunInput, em *agui.Emitter, runLog *agui.Log, sent int) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -290,7 +290,7 @@ func (c *Chat) execute(ctx context.Context, threadID string, in chat.RunInput, e
 // drain forwards every event the run log holds past sent, returning the
 // new offset. Store dedupes exact duplicates; offsets keep each event
 // forwarded exactly once per log.
-func (c *Chat) drain(threadID string, runLog *chat.Log, sent int) int {
+func (c *Chat) drain(threadID string, runLog *agui.Log, sent int) int {
 	evs := runLog.List()
 	if sent > len(evs) {
 		sent = len(evs)
@@ -302,7 +302,7 @@ func (c *Chat) drain(threadID string, runLog *chat.Log, sent int) int {
 	return sent
 }
 
-func (c *Chat) forward(threadID string, runLog *chat.Log, done <-chan struct{}, sent int) {
+func (c *Chat) forward(threadID string, runLog *agui.Log, done <-chan struct{}, sent int) {
 	flush := func() {
 		sent = c.drain(threadID, runLog, sent)
 	}
@@ -334,7 +334,7 @@ func (c *Chat) resolve(ctx echo.Context) []v2.Fired {
 	m := c.mountFor(ctx, threadID)
 	ns := frameNS(m.Prefix, ctx.QueryParam("hxchatns"))
 	events := c.store.List(threadID)
-	msgs := chat.Fold(events)
+	msgs := agui.Fold(events)
 	locked, st, rerr := foldRun(events)
 	var errComp templ.Component
 	if st.Phase == PhaseError && rerr != nil {
@@ -362,7 +362,7 @@ func (c *Chat) terminal(ctx echo.Context) (string, bool) {
 		return "", false
 	}
 	last := events[len(events)-1].Type
-	return "", last == chat.EventRunFinished || last == chat.EventRunError
+	return "", last == agui.EventRunFinished || last == agui.EventRunError
 }
 
 // runFailure carries a RUN_ERROR terminal for the error region.
@@ -374,15 +374,15 @@ type runFailure struct {
 // foldRun derives the lock, status, and error from the event log: any
 // run without a terminal keeps the composer locked; otherwise the
 // latest terminal decides idle vs error.
-func foldRun(events []chat.Event) (locked bool, st RunState, rerr *runFailure) {
+func foldRun(events []agui.Event) (locked bool, st RunState, rerr *runFailure) {
 	open := map[string]bool{}
-	var lastType chat.EventType
-	var last chat.Event
+	var lastType agui.EventType
+	var last agui.Event
 	for _, e := range events {
 		switch e.Type {
-		case chat.EventRunStarted:
+		case agui.EventRunStarted:
 			open[e.RunID] = true
-		case chat.EventRunFinished, chat.EventRunError:
+		case agui.EventRunFinished, agui.EventRunError:
 			delete(open, e.RunID)
 			lastType, last = e.Type, e
 		}
@@ -392,7 +392,7 @@ func foldRun(events []chat.Event) (locked bool, st RunState, rerr *runFailure) {
 			return true, RunState{Phase: PhaseRunning, RunID: id}, nil
 		}
 	}
-	if lastType == chat.EventRunError {
+	if lastType == agui.EventRunError {
 		msg := last.Message
 		if msg == "" {
 			msg = "the run failed"

@@ -19,7 +19,7 @@ import (
 	"github.com/a-h/templ"
 	"github.com/labstack/echo/v4"
 
-	"github.com/joyboydata/kit/chat"
+	"github.com/joyboydata/kit/agui"
 	"github.com/joyboydata/kit/hxchat"
 	v2 "github.com/joyboydata/kit/hxkit/v2"
 )
@@ -30,15 +30,15 @@ var update = flag.Bool("update", false, "rewrite golden files")
 // assigns Seq and signals subscribers non-blockingly.
 type memStore struct {
 	mu     sync.Mutex
-	events map[string][]chat.Event
+	events map[string][]agui.Event
 	subs   map[string]map[chan struct{}]struct{}
 }
 
 func newMemStore() *memStore {
-	return &memStore{events: map[string][]chat.Event{}, subs: map[string]map[chan struct{}]struct{}{}}
+	return &memStore{events: map[string][]agui.Event{}, subs: map[string]map[chan struct{}]struct{}{}}
 }
 
-func (s *memStore) Append(threadID string, e chat.Event) (chat.Event, error) {
+func (s *memStore) Append(threadID string, e agui.Event) (agui.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.ThreadID = threadID
@@ -53,10 +53,10 @@ func (s *memStore) Append(threadID string, e chat.Event) (chat.Event, error) {
 	return e, nil
 }
 
-func (s *memStore) List(threadID string) []chat.Event {
+func (s *memStore) List(threadID string) []agui.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]chat.Event(nil), s.events[threadID]...)
+	return append([]agui.Event(nil), s.events[threadID]...)
 }
 
 func (s *memStore) Subscribe(threadID string) (<-chan struct{}, func()) {
@@ -75,14 +75,14 @@ func (s *memStore) Subscribe(threadID string) (<-chan struct{}, func()) {
 }
 
 // runnerFunc adapts a func to the Runner seam.
-type runnerFunc func(ctx context.Context, in chat.RunInput, em *chat.Emitter) error
+type runnerFunc func(ctx context.Context, in agui.RunInput, em *agui.Emitter) error
 
-func (f runnerFunc) Run(ctx context.Context, in chat.RunInput, em *chat.Emitter) error {
+func (f runnerFunc) Run(ctx context.Context, in agui.RunInput, em *agui.Emitter) error {
 	return f(ctx, in, em)
 }
 
 // echoRunner answers with one text turn naming the input.
-func echoRunner(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
+func echoRunner(_ context.Context, in agui.RunInput, em *agui.Emitter) error {
 	mid := "m-" + in.RunID
 	if err := em.StartText(mid, "assistant"); err != nil {
 		return err
@@ -97,7 +97,7 @@ func echoRunner(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
 }
 
 // failRunner closes the run as failed.
-func failRunner(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
+func failRunner(_ context.Context, in agui.RunInput, em *agui.Emitter) error {
 	return em.FailRun("model blew up", "E_MODEL")
 }
 
@@ -117,11 +117,11 @@ func fixtureMount() hxchat.Mount {
 }
 
 // fixtureMessages covers text, escaping, and a tool call with outcome.
-func fixtureMessages() []chat.Message {
-	return []chat.Message{
+func fixtureMessages() []agui.Message {
+	return []agui.Message{
 		{ID: "m1", Role: "user", Text: "Hello <world>"},
 		{ID: "m2", Role: "assistant", Text: "Hi there",
-			ToolCalls: []chat.ToolCall{{ID: "t1", Name: "search", Args: `{"q":"x"}`, Result: "ok"}}},
+			ToolCalls: []agui.ToolCall{{ID: "t1", Name: "search", Args: `{"q":"x"}`, Result: "ok"}}},
 	}
 }
 
@@ -367,7 +367,7 @@ func TestMutations(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		var once sync.Once
-		blocking := runnerFunc(func(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
+		blocking := runnerFunc(func(_ context.Context, in agui.RunInput, em *agui.Emitter) error {
 			once.Do(func() { close(started) })
 			<-release
 			return echoRunner(context.Background(), in, em)
@@ -484,9 +484,9 @@ func collectFrames(t *testing.T, ch <-chan sseFrame, timeout time.Duration, want
 // seedHistory writes one finished user/assistant turn into the store.
 func seedHistory(t *testing.T, s *memStore, thread string) {
 	t.Helper()
-	l := chat.NewLog(thread)
-	em := chat.NewEmitter(l)
-	in := chat.RunInput{ThreadID: thread, RunID: "r0", Message: chat.Message{ID: "m0", Role: "user", Text: "hey"}}
+	l := agui.NewLog(thread)
+	em := agui.NewEmitter(l)
+	in := agui.RunInput{ThreadID: thread, RunID: "r0", Message: agui.Message{ID: "m0", Role: "user", Text: "hey"}}
 	if err := em.StartRun(in); err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestStreams(t *testing.T) {
 	t.Run("emit pushes new content", func(t *testing.T) {
 		release := make(chan struct{})
 		var once sync.Once
-		blocking := runnerFunc(func(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
+		blocking := runnerFunc(func(_ context.Context, in agui.RunInput, em *agui.Emitter) error {
 			<-release
 			return echoRunner(context.Background(), in, em)
 		})
@@ -565,7 +565,7 @@ func TestStreams(t *testing.T) {
 
 	t.Run("dedup suppresses identical frames", func(t *testing.T) {
 		release := make(chan struct{})
-		blocking := runnerFunc(func(_ context.Context, in chat.RunInput, em *chat.Emitter) error {
+		blocking := runnerFunc(func(_ context.Context, in agui.RunInput, em *agui.Emitter) error {
 			<-release
 			return echoRunner(context.Background(), in, em)
 		})
@@ -586,7 +586,7 @@ func TestStreams(t *testing.T) {
 		}
 		// A notify with no visible change (step frames fold to nothing)
 		// must not produce a duplicate frame.
-		if _, err := s.Append("t1", chat.Event{Type: chat.EventStepStarted, RunID: "r-nope", StepName: "s1"}); err != nil {
+		if _, err := s.Append("t1", agui.Event{Type: agui.EventStepStarted, RunID: "r-nope", StepName: "s1"}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -676,7 +676,7 @@ func TestSlotOverride(t *testing.T) {
 	seedHistory(t, sStock, "abc")
 	decorated := hxchat.New(sCustom, runnerFunc(echoRunner), hxchat.Options{
 		Path: "/chat/:thread",
-		RenderMessage: func(m hxchat.Mount, msg chat.Message) templ.Component {
+		RenderMessage: func(m hxchat.Mount, msg agui.Message) templ.Component {
 			inner := hxchat.DefaultMessageView(m, msg)
 			return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 				if _, err := io.WriteString(w, `<section class="wrap">`); err != nil {

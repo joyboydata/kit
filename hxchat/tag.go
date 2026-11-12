@@ -9,7 +9,7 @@ import (
 
 	"github.com/a-h/templ"
 
-	chatev "github.com/joyboydata/kit/chat"
+	agui "github.com/joyboydata/kit/agui"
 )
 
 // Tag renders the mount: one <chat-thread> carrying the thread, prefix,
@@ -24,11 +24,11 @@ func (c *Chat) Tag(m Mount) templ.Component {
 		m.Theme = c.opts.Theme
 	}
 	store := c.store
-	render := func(ctx context.Context, w io.Writer, m Mount, msgs []chatev.Message) error {
+	render := func(ctx context.Context, w io.Writer, m Mount, msgs []agui.Message) error {
 		return c.renderThread(m, msgs, false, RunState{Phase: PhaseIdle}, nil).Render(ctx, w)
 	}
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		msgs := chatev.Fold(store.List(m.ThreadID))
+		msgs := agui.Fold(store.List(m.ThreadID))
 		var b strings.Builder
 		b.WriteString(`<chat-thread thread="`)
 		b.WriteString(html.EscapeString(m.ThreadID))

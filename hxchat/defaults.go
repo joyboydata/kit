@@ -10,21 +10,21 @@ import (
 
 	"github.com/a-h/templ"
 
-	"github.com/joyboydata/kit/chat"
+	"github.com/joyboydata/kit/agui"
 )
 
 // DefaultThreadView renders the four regions (messages, composer,
 // status, error) with the stock slots and an unlocked composer. The
 // live lock arrives over the stream; Chat's handler renders the same
 // shape with the current lock instead.
-func DefaultThreadView(m Mount, msgs []chat.Message) templ.Component {
+func DefaultThreadView(m Mount, msgs []agui.Message) templ.Component {
 	return renderThread(defaultSlots(), m, msgs, false, RunState{Phase: PhaseIdle}, nil)
 }
 
 // DefaultMessageView renders one folded message: role-stamped text plus
 // any tool calls (name, args, outcome). Text is escaped; the wire is
 // HTML, never client-templated JSON.
-func DefaultMessageView(m Mount, msg chat.Message) templ.Component {
+func DefaultMessageView(m Mount, msg agui.Message) templ.Component {
 	return templ.ComponentFunc(func(_ context.Context, w io.Writer) error {
 		var b strings.Builder
 		b.WriteString(`<div class="hxchat-msg" data-role="`)
@@ -152,7 +152,7 @@ func postAction(m Mount) string {
 // Thread rendering threads the effective message slot through, so a
 // RenderMessage decorator applies to every message in the thread.
 type slots struct {
-	renderMessage  func(m Mount, msg chat.Message) templ.Component
+	renderMessage  func(m Mount, msg agui.Message) templ.Component
 	renderComposer func(m Mount, locked bool) templ.Component
 	renderStatus   func(m Mount, s RunState) templ.Component
 	renderError    func(m Mount, err error, runID string) templ.Component
@@ -187,7 +187,7 @@ func (c *Chat) effectiveSlots() slots {
 }
 
 // renderThread renders the four regions with the chat's effective slots.
-func (c *Chat) renderThread(m Mount, msgs []chat.Message, locked bool, st RunState, rerr *runFailure) templ.Component {
+func (c *Chat) renderThread(m Mount, msgs []agui.Message, locked bool, st RunState, rerr *runFailure) templ.Component {
 	var errComp templ.Component
 	if st.Phase == PhaseError && rerr != nil {
 		errComp = c.effectiveSlots().renderError(m, rerr.err, rerr.runID)
@@ -197,7 +197,7 @@ func (c *Chat) renderThread(m Mount, msgs []chat.Message, locked bool, st RunSta
 
 // renderThread composes the thread body: each region wrapped in its
 // prefixed container so stream frames swap by outerHTML.
-func renderThread(s slots, m Mount, msgs []chat.Message, locked bool, st RunState, errComp templ.Component) templ.Component {
+func renderThread(s slots, m Mount, msgs []agui.Message, locked bool, st RunState, errComp templ.Component) templ.Component {
 	ns := regionNames{base: m.Prefix}
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		if _, err := io.WriteString(w, `<div class="hxchat" data-hxchat-thread>`); err != nil {
@@ -217,7 +217,7 @@ func renderThread(s slots, m Mount, msgs []chat.Message, locked bool, st RunStat
 }
 
 // messagesRegion wraps the folded messages in their swappable container.
-func messagesRegion(id string, m Mount, msgs []chat.Message, render func(Mount, chat.Message) templ.Component) templ.Component {
+func messagesRegion(id string, m Mount, msgs []agui.Message, render func(Mount, agui.Message) templ.Component) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		var b strings.Builder
 		b.WriteString(`<div id="`)
