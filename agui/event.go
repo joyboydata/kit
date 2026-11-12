@@ -1,4 +1,4 @@
-package chat
+package agui
 
 import (
 	"encoding/json"
@@ -120,11 +120,11 @@ type Usage struct {
 // Log.Append, not here, so hand-built events fail fast without a Log.
 func (e Event) Validate() error {
 	if !knownTypes[e.Type] {
-		return fmt.Errorf("chat: unknown event type %q", e.Type)
+		return fmt.Errorf("agui: unknown event type %q", e.Type)
 	}
 	req := func(ok bool, what string) error {
 		if !ok {
-			return fmt.Errorf("chat: %s requires %s", e.Type, what)
+			return fmt.Errorf("agui: %s requires %s", e.Type, what)
 		}
 		return nil
 	}

@@ -1,4 +1,4 @@
-package chat
+package agui
 
 import (
 	"fmt"
@@ -28,10 +28,10 @@ func (m *Emitter) StartRun(in RunInput) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.runID != "" {
-		return fmt.Errorf("chat: run %q already open", m.runID)
+		return fmt.Errorf("agui: run %q already open", m.runID)
 	}
 	if in.ThreadID == "" || in.RunID == "" {
-		return fmt.Errorf("chat: StartRun requires threadId and runId")
+		return fmt.Errorf("agui: StartRun requires threadId and runId")
 	}
 	_, err := m.log.Append(Event{
 		Type: EventRunStarted, Timestamp: time.Now().UnixMilli(),
@@ -71,7 +71,7 @@ func (m *Emitter) FailRun(message, code string) error {
 		return err
 	}
 	if message == "" {
-		return fmt.Errorf("chat: FailRun requires a message")
+		return fmt.Errorf("agui: FailRun requires a message")
 	}
 	if _, err := m.log.Append(Event{
 		Type: EventRunError, Timestamp: time.Now().UnixMilli(),
@@ -187,7 +187,7 @@ func (m *Emitter) emit(e Event) error {
 // requireRun fails writes with no open run. Caller holds m.mu.
 func (m *Emitter) requireRun() error {
 	if m.runID == "" {
-		return fmt.Errorf("chat: no open run (call StartRun first)")
+		return fmt.Errorf("agui: no open run (call StartRun first)")
 	}
 	return nil
 }

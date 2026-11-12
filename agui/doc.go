@@ -1,6 +1,6 @@
 // Package chat is the frozen, stdlib-only core of the chat protocol.
 //
-// Frozen per docs/adr/20261112-2332-chat-protocol-core.md (Phase 1: kit/chat).
+// Frozen per docs/adr/20261112-2332-chat-protocol-core.md (Phase 1: kit/agui).
 //
 // Wire format: one JSON object per event, camelCase keys, absent-means-absent
 // (every field except "type" carries omitempty, so omitted fields are absent —
@@ -34,12 +34,12 @@
 //
 // Worked example:
 //
-//	l := chat.NewLog("thread-1")
-//	em := chat.NewEmitter(l)
-//	_ = em.StartRun(chat.RunInput{ThreadID: "thread-1", RunID: "run-1"})
+//	l := agui.NewLog("thread-1")
+//	em := agui.NewEmitter(l)
+//	_ = em.StartRun(agui.RunInput{ThreadID: "thread-1", RunID: "run-1"})
 //	_ = em.StartText("m-1", "assistant")
 //	_ = em.WriteText("m-1", "Hello")
 //	_ = em.EndText("m-1")
-//	_ = em.FinishRun(&chat.Usage{Input: 3, Output: 5, Total: 8}, "model-x")
+//	_ = em.FinishRun(&agui.Usage{Input: 3, Output: 5, Total: 8}, "model-x")
 //	msgs := l.Fold() // [{ID:m-1 Role:assistant Text:Hello}]
-package chat
+package agui

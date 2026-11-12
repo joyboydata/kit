@@ -1,4 +1,4 @@
-package chat
+package agui
 
 // Fold derives the user-visible message list from an event slice, in order of
 // first appearance. Text and reasoning deltas concatenate (CONTENT and CHUNK

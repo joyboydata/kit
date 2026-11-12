@@ -1,4 +1,4 @@
-package chat
+package agui
 
 import (
 	"fmt"
@@ -57,7 +57,7 @@ func (l *Log) Append(e Event) (Event, error) {
 		e.ThreadID = l.threadID
 	}
 	if e.ThreadID != l.threadID {
-		return Event{}, fmt.Errorf("chat: thread mismatch: event %q, log %q", e.ThreadID, l.threadID)
+		return Event{}, fmt.Errorf("agui: thread mismatch: event %q, log %q", e.ThreadID, l.threadID)
 	}
 	if e.Timestamp == 0 {
 		e.Timestamp = time.Now().UnixMilli()
@@ -94,7 +94,7 @@ func (l *Log) Fold() []Message {
 func (l *Log) check(e Event) error {
 	if e.Type == EventRunStarted {
 		if _, dup := l.runs[e.RunID]; dup {
-			return fmt.Errorf("chat: run %q already started", e.RunID)
+			return fmt.Errorf("agui: run %q already started", e.RunID)
 		}
 		l.runs[e.RunID] = &runState{
 			open: true, texts: map[string]bool{},
@@ -105,7 +105,7 @@ func (l *Log) check(e Event) error {
 	}
 	st, ok := l.runs[e.RunID]
 	if !ok || !st.open {
-		return fmt.Errorf("chat: %s for run %q without open run", e.Type, e.RunID)
+		return fmt.Errorf("agui: %s for run %q without open run", e.Type, e.RunID)
 	}
 	switch e.Type {
 	case EventRunFinished, EventRunError:
@@ -113,89 +113,89 @@ func (l *Log) check(e Event) error {
 		return nil
 	case EventStepStarted:
 		if st.steps[e.StepName] {
-			return fmt.Errorf("chat: step %q already started in run %q", e.StepName, e.RunID)
+			return fmt.Errorf("agui: step %q already started in run %q", e.StepName, e.RunID)
 		}
 		st.steps[e.StepName] = true
 		return nil
 	case EventStepFinished:
 		if !st.steps[e.StepName] {
-			return fmt.Errorf("chat: step %q not open in run %q", e.StepName, e.RunID)
+			return fmt.Errorf("agui: step %q not open in run %q", e.StepName, e.RunID)
 		}
 		st.steps[e.StepName] = false
 		return nil
 	case EventTextMessageStart:
 		if _, dup := st.texts[e.MessageID]; dup {
-			return fmt.Errorf("chat: text message %q already started in run %q", e.MessageID, e.RunID)
+			return fmt.Errorf("agui: text message %q already started in run %q", e.MessageID, e.RunID)
 		}
 		st.texts[e.MessageID] = true
 		return nil
 	case EventTextMessageContent, EventTextMessageChunk:
 		if !st.texts[e.MessageID] {
-			return fmt.Errorf("chat: %s for message %q before START or after END", e.Type, e.MessageID)
+			return fmt.Errorf("agui: %s for message %q before START or after END", e.Type, e.MessageID)
 		}
 		return nil
 	case EventTextMessageEnd:
 		if !st.texts[e.MessageID] {
-			return fmt.Errorf("chat: TEXT_MESSAGE_END for message %q without open segment", e.MessageID)
+			return fmt.Errorf("agui: TEXT_MESSAGE_END for message %q without open segment", e.MessageID)
 		}
 		st.texts[e.MessageID] = false
 		return nil
 	case EventToolCallStart:
 		if _, dup := st.tools[e.ToolCallID]; dup {
-			return fmt.Errorf("chat: tool call %q already started in run %q", e.ToolCallID, e.RunID)
+			return fmt.Errorf("agui: tool call %q already started in run %q", e.ToolCallID, e.RunID)
 		}
 		st.tools[e.ToolCallID] = &toolState{messageID: e.MessageID, argsOpen: true}
 		return nil
 	case EventToolCallArgs, EventToolCallChunk:
 		t, ok := st.tools[e.ToolCallID]
 		if !ok || !t.argsOpen {
-			return fmt.Errorf("chat: %s for tool call %q before START or after END", e.Type, e.ToolCallID)
+			return fmt.Errorf("agui: %s for tool call %q before START or after END", e.Type, e.ToolCallID)
 		}
 		return nil
 	case EventToolCallEnd:
 		t, ok := st.tools[e.ToolCallID]
 		if !ok || !t.argsOpen {
-			return fmt.Errorf("chat: TOOL_CALL_END for tool call %q without open segment", e.ToolCallID)
+			return fmt.Errorf("agui: TOOL_CALL_END for tool call %q without open segment", e.ToolCallID)
 		}
 		t.argsOpen = false
 		return nil
 	case EventToolCallResult:
 		if _, ok := st.tools[e.ToolCallID]; !ok {
-			return fmt.Errorf("chat: TOOL_CALL_RESULT for tool call %q before START", e.ToolCallID)
+			return fmt.Errorf("agui: TOOL_CALL_RESULT for tool call %q before START", e.ToolCallID)
 		}
 		return nil // RESULT may land before or after END
 	case EventReasoningStart:
 		if st.reasoning[e.MessageID] {
-			return fmt.Errorf("chat: reasoning block %q already started in run %q", e.MessageID, e.RunID)
+			return fmt.Errorf("agui: reasoning block %q already started in run %q", e.MessageID, e.RunID)
 		}
 		st.reasoning[e.MessageID] = true
 		return nil
 	case EventReasoningEnd:
 		if !st.reasoning[e.MessageID] {
-			return fmt.Errorf("chat: REASONING_END for message %q without open block", e.MessageID)
+			return fmt.Errorf("agui: REASONING_END for message %q without open block", e.MessageID)
 		}
 		if st.reasonMsgs[e.MessageID] {
-			return fmt.Errorf("chat: REASONING_END for message %q with open reasoning message", e.MessageID)
+			return fmt.Errorf("agui: REASONING_END for message %q with open reasoning message", e.MessageID)
 		}
 		st.reasoning[e.MessageID] = false
 		return nil
 	case EventReasoningMessageStart:
 		if !st.reasoning[e.MessageID] {
-			return fmt.Errorf("chat: REASONING_MESSAGE_START for message %q without open block", e.MessageID)
+			return fmt.Errorf("agui: REASONING_MESSAGE_START for message %q without open block", e.MessageID)
 		}
 		if st.reasonMsgs[e.MessageID] {
-			return fmt.Errorf("chat: reasoning message %q already started in run %q", e.MessageID, e.RunID)
+			return fmt.Errorf("agui: reasoning message %q already started in run %q", e.MessageID, e.RunID)
 		}
 		st.reasonMsgs[e.MessageID] = true
 		return nil
 	case EventReasoningMessageContent, EventReasoningMessageChunk:
 		if !st.reasonMsgs[e.MessageID] {
-			return fmt.Errorf("chat: %s for message %q before START or after END", e.Type, e.MessageID)
+			return fmt.Errorf("agui: %s for message %q before START or after END", e.Type, e.MessageID)
 		}
 		return nil
 	case EventReasoningMessageEnd:
 		if !st.reasonMsgs[e.MessageID] {
-			return fmt.Errorf("chat: REASONING_MESSAGE_END for message %q without open segment", e.MessageID)
+			return fmt.Errorf("agui: REASONING_MESSAGE_END for message %q without open segment", e.MessageID)
 		}
 		st.reasonMsgs[e.MessageID] = false
 		return nil
