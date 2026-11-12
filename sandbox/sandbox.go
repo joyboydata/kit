@@ -11,15 +11,15 @@
 // root per run, wipes the buckets on reseed, and removes it on Close,
 // so seeds never manage temp lifetime themselves.
 //
-// Order is Open -> Build -> Register -> Default seed. Start makes the
-// throwaway Dirs, calls Open once (nil keeps Mount.App as-is with no
-// builder), threads the handle plus Dirs into Build to derive the Mount
-// (capture-style builders close over the concrete Open-created stores
-// via kit Dirs directly), then registers Mount.App (+ Extra) and runs
-// the Default seed. Open owns the handle lifetime: it closes once on
-// Close, never across reseed, so runner subscriptions and handler
-// captures stay stable; reseed hermeticity comes from wiping the
-// buckets plus External.Reset, not from replacing objects.
+// Order is open -> resolve -> Register -> Default seed. Start makes the
+// throwaway Dirs, calls Source.open once (Static returns nil, so Mount.App
+// stays as-is with no builder), threads the handle plus Dirs into
+// Source.resolve to derive the Mount (capture-style Dynamic builders close
+// over the concrete open-created stores via kit Dirs directly), then
+// registers Mount.App (+ Extra) and runs the Default seed. Open owns the
+// handle lifetime: it closes once on Close, never across reseed, so runner
+// subscriptions and handler captures stay stable; reseed hermeticity comes
+// from wiping the buckets plus External.Reset, not from replacing objects.
 //
 // Domain trap: apps that dispatch on Host (subdomain routers) serve the
 // wrong shape on a bare 127.0.0.1 URL. A webhook fire must dial the
@@ -106,8 +106,8 @@ type External interface {
 	Reset()
 }
 
-// Built is the Open-derived app surface. Mount handlers and seed
-// funcs close over the same Open-created stores, so reseed never
+// Built is the resolve-derived app surface. Mount handlers and seed
+// funcs close over the same open-created stores, so reseed never
 // replaces them out from under the running mount.
 type Built struct {
 	Mount    Mount
@@ -115,23 +115,137 @@ type Built struct {
 	Describe func() any
 }
 
-// Config wires the run. Describe snapshots state for GET
+// Source is the polymorphic mount behind Start. Methods are unexported so
+// only kit constructs Sources: Static for the pure flow, Dynamic for the
+// open/build flow.
+type Source interface {
+	open(d Dirs) (io.Closer, error)
+	resolve(d Dirs, h io.Closer) (Built, error)
+}
+
+// Static is today's pure flow (nil-Open behavior): open returns a nil
+// handle, resolve returns the Mount/Seeds/Describe as Built.
+type Static struct {
+	Mount    Mount
+	Seeds    map[string]func(ctx context.Context) error
+	Describe func() any
+}
+
+func (s Static) open(_ Dirs) (io.Closer, error) { return nil, nil }
+
+func (s Static) resolve(_ Dirs, _ io.Closer) (Built, error) {
+	return Built(s), nil
+}
+
+// Dynamic is today's Build path: open calls Open, resolve calls Build
+// with the Dirs plus the open handle.
+type Dynamic struct {
+	Open  func(d Dirs) (io.Closer, error)
+	Build func(d Dirs, handle io.Closer) (Built, error)
+}
+
+func (d Dynamic) open(dirs Dirs) (io.Closer, error) {
+	if d.Open == nil {
+		return nil, nil
+	}
+	return d.Open(dirs)
+}
+
+func (d Dynamic) resolve(dirs Dirs, h io.Closer) (Built, error) {
+	if d.Build == nil {
+		return Built{}, nil
+	}
+	return d.Build(dirs, h)
+}
+
+// legacySource preserves the deprecated Config fields with the old merge
+// semantics: base Mount/Seeds/Describe, replaced by Build's non-nil
+// results. Pure-legacy configs are equivalent to Static (no Open/Build)
+// or Dynamic (no Mount/Seeds/Describe); only mixed configs need this
+// adapter.
+type legacySource struct {
+	mount    Mount
+	seeds    map[string]func(ctx context.Context) error
+	describe func() any
+	openFn   func(d Dirs) (io.Closer, error)
+	buildFn  func(d Dirs, handle io.Closer) (Built, error)
+}
+
+func (l legacySource) open(dirs Dirs) (io.Closer, error) {
+	if l.openFn == nil {
+		return nil, nil
+	}
+	return l.openFn(dirs)
+}
+
+func (l legacySource) resolve(dirs Dirs, h io.Closer) (Built, error) {
+	b := Built{Mount: l.mount, Seeds: l.seeds, Describe: l.describe}
+	if l.buildFn == nil {
+		return b, nil
+	}
+	built, err := l.buildFn(dirs, h)
+	if err != nil {
+		return Built{}, err
+	}
+	b.Mount = built.Mount
+	if built.Seeds != nil {
+		b.Seeds = built.Seeds
+	}
+	if built.Describe != nil {
+		b.Describe = built.Describe
+	}
+	return b, nil
+}
+
+// Config wires the run. Source is the mount: Static for the pure flow,
+// Dynamic for the open/build flow. Describe snapshots state for GET
 // /_control/state (nil renders null). Background starters run after the
 // default seed and stop on Close; they must tolerate reseed wiping the
-// buckets underneath them. Open creates the stores from the throwaway
-// Dirs once before Register (nil keeps Mount.App as-is, no builder).
-// Build derives Mount/Seeds/Describe from the Open handle plus Dirs
-// once before Register; nil keeps the Config values as-is. A non-nil
-// Seeds/Describe inside Built replaces the Config one; nil keeps it.
+// buckets underneath them.
+//
+// Deprecated: Mount, Seeds, Describe, Open, Build are still accepted and
+// mapped internally (pure Mount/Seeds/Describe to Static, pure Open/Build
+// to Dynamic, mixed to the old merge). New code must set Source and leave
+// them unset; setting both returns an error from Start/Run.
 type Config struct {
-	Mount      Mount
+	Source     Source
 	Externals  []External
-	Seeds      map[string]func(ctx context.Context) error
 	Default    string
-	Open       func(d Dirs) (io.Closer, error)
-	Build      func(d Dirs, handle io.Closer) (Built, error)
-	Describe   func() any
 	Background []func(ctx context.Context) error
+
+	// Deprecated: use Source (Static/Dynamic) instead.
+	Mount    Mount
+	Seeds    map[string]func(ctx context.Context) error
+	Describe func() any
+	Open     func(d Dirs) (io.Closer, error)
+	Build    func(d Dirs, handle io.Closer) (Built, error)
+}
+
+// effectiveSource maps Config to the single polymorphic Source. Pure
+// deprecated configs become Static/Dynamic directly; mixed ones keep the
+// old merge via legacySource.
+func (c Config) effectiveSource() (Source, error) {
+	if c.Source != nil {
+		if c.Mount.App.Resources != nil || c.Mount.Host != "" || c.Mount.Extra != nil ||
+			c.Seeds != nil || c.Describe != nil || c.Open != nil || c.Build != nil {
+			return nil, fmt.Errorf("sandbox: Config.Source set with deprecated Mount/Seeds/Describe/Open/Build; use Static/Dynamic only")
+		}
+		return c.Source, nil
+	}
+	if c.Open == nil && c.Build == nil {
+		return Static{Mount: c.Mount, Seeds: c.Seeds, Describe: c.Describe}, nil
+	}
+	if c.Mount.App.Resources == nil && c.Mount.Host == "" && c.Mount.Extra == nil &&
+		c.Seeds == nil && c.Describe == nil {
+		return Dynamic{Open: c.Open, Build: c.Build}, nil
+	}
+	return legacySource{
+		mount:    c.Mount,
+		seeds:    c.Seeds,
+		describe: c.Describe,
+		openFn:   c.Open,
+		buildFn:  c.Build,
+	}, nil
 }
 
 // Env is the live run. WebClient carries a jar and dials 127.0.0.1 for
@@ -165,35 +279,34 @@ func Start(cfg Config) (*Env, error) {
 		}
 	}
 
-	h := &harness{cfg: cfg, dirs: dirs, root: root}
-	h.mount = cfg.Mount
-	h.seeds = cfg.Seeds
-	h.describeFn = cfg.Describe
+	h := &harness{externals: cfg.Externals, dirs: dirs, root: root}
 
-	// Open-first: stores exist before the mount registers, so builders
-	// close over kit Dirs directly instead of a caller-owned mirror.
-	if err := h.open(); err != nil {
+	src, err := cfg.effectiveSource()
+	if err != nil {
 		_ = os.RemoveAll(root)
 		return nil, err
 	}
-	if cfg.Build != nil {
-		built, err := cfg.Build(dirs, h.handle)
-		if err != nil {
-			if h.handle != nil {
-				_ = h.handle.Close()
-				h.handle = nil
-			}
-			_ = os.RemoveAll(root)
-			return nil, err
-		}
-		h.mount = built.Mount
-		if built.Seeds != nil {
-			h.seeds = built.Seeds
-		}
-		if built.Describe != nil {
-			h.describeFn = built.Describe
-		}
+
+	// Open-first: stores exist before the mount registers, so builders
+	// close over kit Dirs directly instead of a caller-owned mirror.
+	handle, err := src.open(dirs)
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return nil, err
 	}
+	h.handle = handle
+	built, err := src.resolve(dirs, handle)
+	if err != nil {
+		if h.handle != nil {
+			_ = h.handle.Close()
+			h.handle = nil
+		}
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
+	h.mount = built.Mount
+	h.seeds = built.Seeds
+	h.describeFn = built.Describe
 
 	e := echo.New()
 	e.HideBanner = true
@@ -315,12 +428,12 @@ func Run(cfg Config) error {
 }
 
 // harness owns the mutable run state; only reseed mutates scenario.
-// mount/seeds/describeFn are the effective values: Config's, replaced
-// by Build's non-nil results before Register. The handle opens once
-// and closes once; reseed never touches it.
+// mount/seeds/describeFn are the effective values from Source.resolve
+// before Register. The handle opens once and closes once; reseed never
+// touches it.
 type harness struct {
 	mu         sync.Mutex
-	cfg        Config
+	externals  []External
 	dirs       Dirs
 	root       string
 	handle     io.Closer
@@ -332,18 +445,6 @@ type harness struct {
 	srv  *http.Server
 	stop context.CancelFunc
 	bg   sync.WaitGroup
-}
-
-func (h *harness) open() error {
-	if h.cfg.Open == nil {
-		return nil
-	}
-	handle, err := h.cfg.Open(h.dirs)
-	if err != nil {
-		return err
-	}
-	h.handle = handle
-	return nil
 }
 
 // reseed wipes the buckets, resets externals, and runs the scenario.
@@ -366,7 +467,7 @@ func (h *harness) reseed(scenario string) error {
 			return err
 		}
 	}
-	for _, ext := range h.cfg.Externals {
+	for _, ext := range h.externals {
 		if ext != nil {
 			ext.Reset()
 		}
@@ -392,7 +493,7 @@ func (h *harness) report() map[string]any {
 }
 
 func (h *harness) lookup(name string) External {
-	for _, ext := range h.cfg.Externals {
+	for _, ext := range h.externals {
 		if ext != nil && ext.Name() == name {
 			return ext
 		}
@@ -445,7 +546,7 @@ func (h *harness) serveScenarios(c echo.Context) error {
 
 func (h *harness) serveGetWorld(c echo.Context) error {
 	out := map[string]any{}
-	for _, ext := range h.cfg.Externals {
+	for _, ext := range h.externals {
 		if ext != nil {
 			out[ext.Name()] = ext.State()
 		}

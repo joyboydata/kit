@@ -109,33 +109,32 @@ func (s *stubExternal) fired() string {
 
 func testConfig(ext *stubExternal, hookSeen *string, hookMu *sync.Mutex) sandbox.Config {
 	return sandbox.Config{
-		Mount: sandbox.Mount{
-			App: stubApp(),
-			Extra: func(e *echo.Echo) {
-				e.POST("/hook", func(c echo.Context) error {
-					hookMu.Lock()
-					*hookSeen = c.Request().Host
-					hookMu.Unlock()
-					return c.NoContent(http.StatusOK)
-				})
+		Source: sandbox.Static{
+			Mount: sandbox.Mount{
+				App: stubApp(),
+				Extra: func(e *echo.Echo) {
+					e.POST("/hook", func(c echo.Context) error {
+						hookMu.Lock()
+						*hookSeen = c.Request().Host
+						hookMu.Unlock()
+						return c.NoContent(http.StatusOK)
+					})
+				},
+			},
+			Seeds: map[string]func(ctx context.Context) error{
+				"alpha": func(_ context.Context) error {
+					return ext.Set(map[string]any{"email": "alpha@example.com"})
+				},
+				"beta": func(_ context.Context) error {
+					return ext.Set(map[string]any{"email": "beta@example.com"})
+				},
+			},
+			Describe: func() any {
+				return ext.State()
 			},
 		},
 		Externals: []sandbox.External{ext},
-		Seeds: map[string]func(ctx context.Context) error{
-			"alpha": func(_ context.Context) error {
-				return ext.Set(map[string]any{"email": "alpha@example.com"})
-			},
-			"beta": func(_ context.Context) error {
-				return ext.Set(map[string]any{"email": "beta@example.com"})
-			},
-		},
-		Default: "alpha",
-		Open: func(_ sandbox.Dirs) (io.Closer, error) {
-			return io.NopCloser(nil), nil
-		},
-		Describe: func() any {
-			return ext.State()
-		},
+		Default:   "alpha",
 	}
 }
 
@@ -327,53 +326,55 @@ func TestOpenFirstCapture(t *testing.T) {
 	var buildDirs sandbox.Dirs
 
 	cfg := sandbox.Config{
-		Open: func(d sandbox.Dirs) (io.Closer, error) {
-			openCalls++
-			// kit Dirs already exist; capture-style apps use them directly.
-			for _, dir := range []string{d.Data, d.Apps, d.Forks} {
-				if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-					return nil, fmt.Errorf("sandbox: missing dir %s", dir)
+		Source: sandbox.Dynamic{
+			Open: func(d sandbox.Dirs) (io.Closer, error) {
+				openCalls++
+				// kit Dirs already exist; capture-style apps use them directly.
+				for _, dir := range []string{d.Data, d.Apps, d.Forks} {
+					if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+						return nil, fmt.Errorf("sandbox: missing dir %s", dir)
+					}
 				}
-			}
-			if err := os.WriteFile(filepath.Join(d.Data, "marker.txt"), []byte("kit-dirs"), 0o644); err != nil {
-				return nil, err
-			}
-			opened = &captureStore{msg: "open-created", dirs: d}
-			return opened, nil
-		},
-		Build: func(d sandbox.Dirs, handle io.Closer) (sandbox.Built, error) {
-			st, ok := handle.(*captureStore)
-			if !ok {
-				return sandbox.Built{}, fmt.Errorf("sandbox: handle is %T, want *captureStore", handle)
-			}
-			buildDirs = d
-			app := v2.App{
-				Resources: []v2.Resource{
-					{
-						Path: "/",
-						Representations: []v2.Representation{
-							{Name: "", Handler: func(c echo.Context) (templ.Component, error) {
-								raw, err := os.ReadFile(filepath.Join(st.dirs.Data, "marker.txt"))
-								marker := "missing"
-								if err == nil {
-									marker = string(raw)
-								}
-								return text(st.get() + "|" + marker), nil
-							}},
+				if err := os.WriteFile(filepath.Join(d.Data, "marker.txt"), []byte("kit-dirs"), 0o644); err != nil {
+					return nil, err
+				}
+				opened = &captureStore{msg: "open-created", dirs: d}
+				return opened, nil
+			},
+			Build: func(d sandbox.Dirs, handle io.Closer) (sandbox.Built, error) {
+				st, ok := handle.(*captureStore)
+				if !ok {
+					return sandbox.Built{}, fmt.Errorf("sandbox: handle is %T, want *captureStore", handle)
+				}
+				buildDirs = d
+				app := v2.App{
+					Resources: []v2.Resource{
+						{
+							Path: "/",
+							Representations: []v2.Representation{
+								{Name: "", Handler: func(c echo.Context) (templ.Component, error) {
+									raw, err := os.ReadFile(filepath.Join(st.dirs.Data, "marker.txt"))
+									marker := "missing"
+									if err == nil {
+										marker = string(raw)
+									}
+									return text(st.get() + "|" + marker), nil
+								}},
+							},
 						},
 					},
-				},
-			}
-			return sandbox.Built{
-				Mount: sandbox.Mount{App: app},
-				Seeds: map[string]func(ctx context.Context) error{
-					"greet": func(_ context.Context) error {
-						st.set("seeded-hi")
-						return nil
+				}
+				return sandbox.Built{
+					Mount: sandbox.Mount{App: app},
+					Seeds: map[string]func(ctx context.Context) error{
+						"greet": func(_ context.Context) error {
+							st.set("seeded-hi")
+							return nil
+						},
 					},
-				},
-				Describe: func() any { return st.get() },
-			}, nil
+					Describe: func() any { return st.get() },
+				}, nil
+			},
 		},
 	}
 	env, err := sandbox.Start(cfg)
@@ -419,6 +420,12 @@ func TestOpenFirstCapture(t *testing.T) {
 	}
 }
 
+func staticWithMount(cfg sandbox.Config, mount sandbox.Mount) sandbox.Static {
+	st := cfg.Source.(sandbox.Static)
+	st.Mount = mount
+	return st
+}
+
 func getHost(t *testing.T, client *http.Client, url, host string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -443,8 +450,9 @@ func TestExtraRawHatch(t *testing.T) {
 	var hookMu sync.Mutex
 	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
 	cfg := testConfig(ext, &hookSeen, &hookMu)
-	keep := cfg.Mount.Extra
-	cfg.Mount.Extra = func(e *echo.Echo) {
+	st := cfg.Source.(sandbox.Static)
+	keep := st.Mount.Extra
+	st.Mount.Extra = func(e *echo.Echo) {
 		keep(e)
 		e.Any("/files/*", func(c echo.Context) error {
 			return c.String(http.StatusOK, "file:"+c.Param("*"))
@@ -453,6 +461,7 @@ func TestExtraRawHatch(t *testing.T) {
 			return c.String(http.StatusOK, c.Request().Host)
 		})
 	}
+	cfg.Source = st
 	env, err := sandbox.Start(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +497,8 @@ func TestExtraRawHatch(t *testing.T) {
 
 func payConfig(ext *stubExternal, hookSeen *string, hookMu *sync.Mutex) sandbox.Config {
 	cfg := testConfig(ext, hookSeen, hookMu)
-	mount := cfg.Mount
+	st := cfg.Source.(sandbox.Static)
+	mount := st.Mount
 	mount.Host = "billing.app.example"
 	keep := mount.Extra
 	mount.Extra = func(e *echo.Echo) {
@@ -520,7 +530,7 @@ func payConfig(ext *stubExternal, hookSeen *string, hookMu *sync.Mutex) sandbox.
 			return c.JSON(http.StatusOK, map[string]string{"activated": req.Email, "host": host})
 		})
 	}
-	cfg.Mount = mount
+	cfg.Source = staticWithMount(cfg, mount)
 	return cfg
 }
 
@@ -590,7 +600,9 @@ func TestMountHostDefault(t *testing.T) {
 	var hookMu sync.Mutex
 	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
 	cfg := testConfig(ext, &hookSeen, &hookMu)
-	cfg.Mount.Host = "billing.app.example"
+	st := cfg.Source.(sandbox.Static)
+	st.Mount.Host = "billing.app.example"
+	cfg.Source = st
 	env, err := sandbox.Start(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -658,5 +670,156 @@ func TestSingleIdentityScope(t *testing.T) {
 		if _, body := get(t, c, env.BaseURL+"/_control/state"); !strings.Contains(body, "beta@example.com") {
 			t.Fatalf("jar %s after reseed = %q, want shared beta state", name, body)
 		}
+	}
+}
+
+// TestLegacyShim locks the backwards-compat path: deprecated Config fields
+// still boot (pure Mount/Seeds/Describe maps to Static internally), and
+// mixing Source with legacy fields is an error.
+func TestLegacyShim(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	legacy := sandbox.Config{
+		Mount:     sandbox.Mount{App: stubApp()},
+		Externals: []sandbox.External{ext},
+		Seeds: map[string]func(ctx context.Context) error{
+			"alpha": func(_ context.Context) error {
+				return ext.Set(map[string]any{"email": "alpha@example.com"})
+			},
+		},
+		Default:  "alpha",
+		Open:     func(_ sandbox.Dirs) (io.Closer, error) { return io.NopCloser(nil), nil },
+		Describe: func() any { return ext.State() },
+	}
+	env, err := sandbox.Start(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	client := env.WebClient()
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("legacy shim state = %d %q, want default Describe", code, body)
+	}
+
+	conflict := legacy
+	conflict.Source = sandbox.Static{Mount: sandbox.Mount{App: stubApp()}}
+	if _, err := sandbox.Start(conflict); err == nil {
+		t.Fatal("Source+legacy = nil, want conflict error")
+	}
+}
+
+// TestDynamicControlParity proves all 8 _control routes work on the Dynamic
+// path too: state GET/PUT, seed compat POST, scenarios GET, world
+// GET/GET-by-name/PUT/POST-fire.
+func TestDynamicControlParity(t *testing.T) {
+	var hookSeen string
+	var hookMu sync.Mutex
+	ext := &stubExternal{email: "fake@example.com", hookSeen: &hookSeen, hookMu: &hookMu}
+	openCalls := 0
+	cfg := sandbox.Config{
+		Source: sandbox.Dynamic{
+			Open: func(_ sandbox.Dirs) (io.Closer, error) {
+				openCalls++
+				return io.NopCloser(nil), nil
+			},
+			Build: func(_ sandbox.Dirs, _ io.Closer) (sandbox.Built, error) {
+				return sandbox.Built{
+					Mount: sandbox.Mount{
+						App: stubApp(),
+						Extra: func(e *echo.Echo) {
+							e.POST("/hook", func(c echo.Context) error {
+								hookMu.Lock()
+								hookSeen = c.Request().Host
+								hookMu.Unlock()
+								return c.NoContent(http.StatusOK)
+							})
+						},
+					},
+					Seeds: map[string]func(ctx context.Context) error{
+						"alpha": func(_ context.Context) error {
+							return ext.Set(map[string]any{"email": "alpha@example.com"})
+						},
+						"beta": func(_ context.Context) error {
+							return ext.Set(map[string]any{"email": "beta@example.com"})
+						},
+					},
+					Describe: func() any { return ext.State() },
+				}, nil
+			},
+		},
+		Externals: []sandbox.External{ext},
+		Default:   "alpha",
+	}
+	env, err := sandbox.Start(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	ext.mu.Lock()
+	ext.hookURL = env.BaseURL + "/hook"
+	ext.mu.Unlock()
+	client := env.WebClient()
+
+	// 1-2: app + state GET.
+	if code, body := get(t, client, env.BaseURL+"/"); code != http.StatusOK || body != "hello" {
+		t.Fatalf("GET / = %d %q, want 200 hello", code, body)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("GET state = %d %q, want default", code, body)
+	}
+	// 3: scenarios GET.
+	if code, body := get(t, client, env.BaseURL+"/_control/scenarios"); code != http.StatusOK || !strings.Contains(body, "alpha") || !strings.Contains(body, "beta") {
+		t.Fatalf("GET scenarios = %d %q, want alpha+beta", code, body)
+	}
+	// 4: state PUT (reseed).
+	if err := env.Seed("beta"); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/state"); code != http.StatusOK || !strings.Contains(body, "beta@example.com") {
+		t.Fatalf("after Seed(beta) = %d %q", code, body)
+	}
+	// 5: seed compat POST.
+	resp, err := client.Post(env.BaseURL+"/_control/seed?scenario=alpha", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /_control/seed = %d, want 200", resp.StatusCode)
+	}
+	// 6-8: world GET, GET-by-name, PUT.
+	if code, body := get(t, client, env.BaseURL+"/_control/world"); code != http.StatusOK || !strings.Contains(body, "mail") {
+		t.Fatalf("GET world = %d %q, want mail", code, body)
+	}
+	if code, body := get(t, client, env.BaseURL+"/_control/world/mail"); code != http.StatusOK || !strings.Contains(body, "alpha@example.com") {
+		t.Fatalf("GET world/mail = %d %q", code, body)
+	}
+	setReq, _ := http.NewRequest(http.MethodPut, env.BaseURL+"/_control/world/mail", strings.NewReader(`{"email":"dyn@example.com"}`))
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp, err := client.Do(setReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = setResp.Body.Close()
+	if setResp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT world/mail = %d, want 200", setResp.StatusCode)
+	}
+	// 8: world fire.
+	fireResp, err := client.Post(env.BaseURL+"/_control/world/mail/fire", "application/json", strings.NewReader(`{"host":"dyn.example"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fired map[string]string
+	_ = json.NewDecoder(fireResp.Body).Decode(&fired)
+	_ = fireResp.Body.Close()
+	if fireResp.StatusCode != http.StatusOK || fired["host"] != "dyn.example" {
+		t.Fatalf("POST fire = %d %v, want host echo", fireResp.StatusCode, fired)
+	}
+	if got := ext.fired(); got != "dyn.example" {
+		t.Fatalf("fired host = %q, want dyn.example", got)
+	}
+	if openCalls != 1 {
+		t.Fatalf("openCalls = %d, want stable handle (1)", openCalls)
 	}
 }
