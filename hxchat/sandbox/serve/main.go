@@ -15,7 +15,7 @@ import (
 func main() {
 	store := demo.NewMemStore()
 	mount, seeds := demo.Build(store)
-	env, err := sandbox.Start(sandbox.Config{
+	env, err := sandbox.Start(sandbox.Config{ //nolint:staticcheck // sanctioned Source use; whole-Config marker removal pending
 		Source: sandbox.Static{
 			Mount: mount,
 			Seeds: seeds,

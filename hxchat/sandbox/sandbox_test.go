@@ -18,7 +18,7 @@ import (
 func TestServeWiring(t *testing.T) {
 	store := demo.NewMemStore()
 	mount, seeds := demo.Build(store)
-	env, err := sandbox.Start(sandbox.Config{
+	env, err := sandbox.Start(sandbox.Config{ //nolint:staticcheck // sanctioned Source use; whole-Config marker removal pending
 		Source: sandbox.Static{
 			Mount: mount,
 			Seeds: seeds,
@@ -121,7 +121,7 @@ func TestServeWiring(t *testing.T) {
 func TestFailedSeed(t *testing.T) {
 	store := demo.NewMemStore()
 	mount, seeds := demo.Build(store)
-	env, err := sandbox.Start(sandbox.Config{
+	env, err := sandbox.Start(sandbox.Config{ //nolint:staticcheck // sanctioned Source use; whole-Config marker removal pending
 		Source: sandbox.Static{Mount: mount, Seeds: seeds},
 	})
 	if err != nil {
