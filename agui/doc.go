@@ -22,15 +22,30 @@
 // Triad discipline: every streaming family is START → (CONTENT|CHUNK)* → END.
 // Content before START, after END, or outside an open run is rejected by
 // Append. FINISH/ERROR close exactly the open run they name; a second
-// terminal for the same run is rejected.
+// terminal for the same run is rejected. Append keeps this frozen core;
+// AppendStream adds the spec-1.0 stream lifecycle (fail-before-begin and
+// late RUN_ERROR) without touching it.
 //
 // Fold semantics: Fold derives the user-visible message list from the event
 // stream. Text deltas concatenate into Message.Text; tool calls attach to the
 // parent messageId (START.delta carries the tool name, ARGS/CHUNK deltas carry
 // args fragments, RESULT sets the outcome); reasoning blocks fold into their
-// own Message with Role "reasoning"; RUN/STEP frames and unknown types are
-// ignored. Fold is outcome-agnostic — a RUN_ERROR never erases partial
-// content — and total: orphans and unknown types are skipped, never fatal.
+// own Message with Role "reasoning"; activity snapshots fold into Role
+// "activity" messages amended by ACTIVITY_DELTA; MESSAGES_SNAPSHOT reconciles
+// the whole list by id (activity/reasoning the producer cannot know survive
+// unless the snapshot carries that role); encrypted values attach to their
+// named message or tool call. RUN/STEP/STATE/SUBAGENT/RAW/CUSTOM frames and
+// unknown types are ignored. Fold is outcome-agnostic — a RUN_ERROR never
+// erases partial content — and total: orphans and unknown types are skipped,
+// never fatal.
+//
+// State lives beside the fold: STATE_SNAPSHOT replaces the run state wholesale
+// (seeded by the RunInput echo on RUN_STARTED) and STATE_DELTA amends it via
+// atomic RFC 6902 patches, readable with Log.StateOf; Log.ActivityOf and
+// Log.SubagentOpen expose activity content and invocation liveness the same
+// way. Subagent ids name invocations, never reuse within a run, and own their
+// segments: continuations tagged otherwise are rejected, usage stays on the
+// parent RUN_FINISHED, and a run never finishes with an open invocation.
 //
 // Worked example:
 //
