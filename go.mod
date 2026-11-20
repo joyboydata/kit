@@ -8,10 +8,8 @@ require (
 	github.com/creasty/defaults v1.8.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/labstack/echo/v4 v4.15.4
-	github.com/lib/pq v1.12.3
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	go.etcd.io/bbolt v1.5.0
 	golang.org/x/tools v0.45.0
 )
 
